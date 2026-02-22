@@ -1,0 +1,143 @@
+sudo tee /etc/sysctl.d/99-custom-tuning.conf <<EOF
+net.core.somaxconn = 65535
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 10
+net.ipv4.ip_local_port_range = 1024 65535
+EOF
+
+sudo sysctl --system
+
+
+# Create directory for slickproxy
+mkdir ~/slickproxy && cd ~/slickproxy
+chmod 777 slickproxy
+
+# Place config.json or viprox.json
+cp /etc/socks_to_http.json ./viprox.json
+
+# Enable and start service
+sudo systemctl daemon-reload
+sudo systemctl enable slickproxy
+sudo systemctl start slickproxy
+sudo systemctl status slickproxy
+
+# Check logs
+sudo journalctl -u slickproxy.service -f
+
+sudo dnf install mysql-server -y
+sudo systemctl enable mysqld
+sudo systemctl start mysqld
+sudo systemctl status mysqld
+
+# Secure MySQL
+sudo mysql_secure_installation
+
+# Login
+sudo mysql -u root -p
+
+
+# Add repo and install
+sudo tee /etc/yum.repos.d/influxdb.repo <<EOF
+[influxdb]
+name = InfluxDB Repository - RHEL 8
+baseurl = https://repos.influxdata.com/rhel/8/x86_64/stable/
+enabled = 1
+gpgcheck = 1
+gpgkey = https://repos.influxdata.com/influxdb.key
+EOF
+
+sudo dnf clean all
+sudo dnf makecache
+sudo dnf install influxdb -y --nogpgcheck
+
+sudo systemctl enable influxdb
+sudo systemctl start influxdb
+sudo systemctl status influxdb
+
+# Allow port 8086
+sudo firewall-cmd --permanent --add-port=8086/tcp
+sudo firewall-cmd --reload
+
+
+
+sudo tee /etc/yum.repos.d/grafana.repo <<EOF
+[grafana]
+name=grafana
+baseurl=https://packages.grafana.com/oss/rpm
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://packages.grafana.com/gpg.key
+EOF
+
+sudo dnf install grafana -y
+sudo systemctl daemon-reload
+sudo systemctl enable grafana-server
+sudo systemctl start grafana-server
+
+
+sudo rpm --import https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key
+sudo tee /etc/yum.repos.d/clickhouse.repo <<EOF
+[clickhouse]
+name=ClickHouse
+baseurl=https://packages.clickhouse.com/rpm/lts/
+enabled=1
+gpgcheck=1
+gpgkey=https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key
+EOF
+
+sudo dnf install clickhouse-server clickhouse-client -y --nogpgcheck
+sudo systemctl enable clickhouse-server
+sudo systemctl start clickhouse-server
+sudo systemctl status clickhouse-server
+
+# Allow ClickHouse ports
+sudo iptables -I INPUT -p tcp --dport 9000 -j ACCEPT
+sudo iptables -I INPUT -p tcp --dport 8123 -j ACCEPT
+sudo iptables-save | sudo tee /etc/sysconfig/iptables
+
+
+CREATE TABLE default.audit_logs
+(
+    Host String,
+    Type String,
+    Bytes Int64,
+    User String,
+    Country String,
+    Session String,
+    Time Int64,
+    Password String,
+    City String,
+    State String,
+    Code String,
+    UpstreamProxyIp String,
+    UpstreamProxyPort Int32,
+    Success UInt8,
+    Timestamp Int64,
+    Attempts Int32,
+    TotalRequestTime Int64,
+    Error String,
+    node_hostname String,
+    ClientIP String,
+    UpstreamProxyUser String,
+    UpstreamProxyPass String,
+    UpstreamProxyRemote UInt8
+)
+ENGINE = MergeTree()
+PARTITION BY toDate(toDateTime(Timestamp))
+ORDER BY (Timestamp, Host, User)
+SETTINGS index_granularity = 8192;
+
+
+sudo iptables -I INPUT -p tcp --dport 1080 -j ACCEPT   # SOCKS
+sudo iptables -I INPUT -p tcp --dport 3128 -j ACCEPT   # Squid
+sudo iptables -I INPUT -p tcp --dport 8080 -j ACCEPT   # Proxy API
+sudo iptables -I INPUT -p tcp --dport 443 -j ACCEPT   # HTTPS
+sudo iptables -I INPUT -p tcp --dport 8086 -j ACCEPT   # InfluxDB
+sudo iptables -I INPUT -p tcp --dport 9000 -j ACCEPT   # ClickHouse
+sudo iptables -I INPUT -p tcp --dport 8123 -j ACCEPT   # ClickHouse HTTP
+sudo iptables-save | sudo tee /etc/sysconfig/iptables
+
+
+
+

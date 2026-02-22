@@ -1,0 +1,68 @@
+func (adapter *SOCKS5ToHTTPAdapter) logAccessLog(
+	clientConn net.Conn,
+	proxyAddr string,
+	targetAddr string,
+	username string,
+	inBytes, outBytes int64,
+	startTime time.Time,
+	targetIP string,
+	responseCode string,
+) {
+	duration := time.Since(startTime).Milliseconds()
+	timestamp := float64(time.Now().UnixNano()) / 1e9
+
+	localIP := "-"
+	targetHost := ""
+
+	sourceIP, _, _ := net.SplitHostPort(clientConn.RemoteAddr().String())
+	if proxyAddr != "" {
+		localIP, _, _ = net.SplitHostPort(proxyAddr)
+	}
+
+	if targetAddr != "" {
+		targetHost, _, _ = net.SplitHostPort(targetAddr)
+	}
+
+	logLine := fmt.Sprintf(accessLogFormat,
+		timestamp,
+		inBytes,
+		sourceIP,
+		responseCode,
+		outBytes,
+		targetAddr,
+		username,
+		targetHost,
+		localIP,
+		duration,
+		targetIP,
+		localIP,
+	)
+
+	select {
+	case adapter.LogChan <- logLine:
+	default:
+		// Drop if channel is full
+		adapter.AccessLog.Printf("⚠️ logChan full — dropped log: %s", logLine)
+	}
+}
+
+LogChan:    make(chan string, 1000), // buffered channel
+
+go func() {
+		for line := range adapter.LogChan {
+			adapter.AccessLog.Println(line)
+		}
+	}()
+
+	var reStatus = regexp.MustCompile(`HTTP/[\d.]+\s+(\d{3})`)
+
+	targetIP, _, _ := net.SplitHostPort(proxyConn.RemoteAddr().String())
+
+	statusCode := "200"
+  	match := reStatus.FindStringSubmatch(statusLine)
+  	if len(match) > 1 {
+  		statusCode = match[1] // this will be "200"
+  	}
+
+	adapter.logAccessLog(clientConn, proxyAddr, targetAddr, username, inBytes, outBytes, startTime, targetIP, statusCode)
+

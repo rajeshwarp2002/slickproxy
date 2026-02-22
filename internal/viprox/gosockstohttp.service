@@ -1,0 +1,12 @@
+[Unit]
+Description=Socks to HTTP
+After=multi-user.target
+
+[Service]
+Type=simple
+Restart=always
+LimitNOFILE=500000
+ExecStart=/opt/scripts/socks_to_http --config /etc/socks_to_http.json
+
+[Install]
+WantedBy=multi-user.target

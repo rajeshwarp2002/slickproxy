@@ -1,0 +1,15 @@
+{
+  "listen_host": "0.0.0.0",
+  "listen_port": 1091,
+  "log_path": "/var/log",
+  "debug_log_file": "socks_to_http1.log",
+  "access_log_file": "access_socks_to_http1.log",
+  "endpoint_conf_file": "/etc/squid/endpoints.conf",
+  "db_auth_path" : "/dev/shm/squid_db_auth",
+  "ip_auth_path" : "/dev/shm/squid_ip_auth",
+  "auth_map_file": "/etc/squid/auth_map.csv",
+  "auth_refresh_interval": 10,
+  "endpoint_refresh_interval": 30,
+  "remote_proxy_port_range" : "100000-3150000",
+  "peer_retry_attempts": 3 
+}

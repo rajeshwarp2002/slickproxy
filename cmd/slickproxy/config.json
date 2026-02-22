@@ -1,0 +1,33 @@
+{
+
+  "general": {
+    "lb": true,
+    "cluster": true,
+    "max-retries":3,
+    "trackusage":true 
+},
+"db": {
+    "connection": "127.0.0.1:3306",
+    "global_usage": false
+},
+
+  "ports": [
+                "4567",
+    "10000-15000"
+        ],
+        "subnets": [
+                "2a01:4f8:c010:b054::/64"
+
+        ],
+  "proxies": [
+  {
+  "ip": "gw-ps-ul.viprox.net",
+  "port": 1080,
+  "socks5": true,
+  "username": "navepsul-rc_all",
+  "password": "g4x8stt76m",
+  "bytes_per_second": 0 
+}
+  ]
+
+}
