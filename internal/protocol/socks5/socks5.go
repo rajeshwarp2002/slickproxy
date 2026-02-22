@@ -9,8 +9,8 @@ import (
 	"net"
 	"slickproxy/internal/config"
 
+	"slickproxy/internal/clientrequest"
 	"slickproxy/internal/directproxy"
-	"slickproxy/internal/request"
 	"slickproxy/internal/upstream"
 	"slickproxy/internal/userdb"
 
@@ -34,7 +34,7 @@ func isIPInUserWhitelist(ipAddress net.IP, user *userdb.User) bool {
 	return false
 }
 
-func validateUserCredentials(requestObj *request.Request, dataStore userdb.DataStore) error {
+func validateUserCredentials(requestObj *clientrequest.Request, dataStore userdb.DataStore) error {
 	buf := make([]byte, 513)
 	n, err := io.ReadFull(requestObj.Conn, buf[:2])
 	if err != nil {
@@ -181,7 +181,7 @@ var (
 	errNoValidAuthenticationMethods = errors.New("no acceptable authentication methods")
 )
 
-func initiateSOCKS5Protocol(requestObj request.Request, reader *bufio.Reader) error {
+func initiateSOCKS5Protocol(requestObj clientrequest.Request, reader *bufio.Reader) error {
 	buf := make([]byte, 258)
 
 	n, err := io.ReadFull(reader, buf[:2])
@@ -229,9 +229,9 @@ func requiresAuthentication(methods []byte) bool {
 	return false
 }
 
-func HandleSOCKS5Connection(reader *bufio.Reader, conn net.Conn, dataStore userdb.DataStore) (request.Request, error) {
-	requestObj := request.NewRequest(conn, "socks5")
-	defer func(requestObj *request.Request) {
+func HandleSOCKS5Connection(reader *bufio.Reader, conn net.Conn, dataStore userdb.DataStore) (clientrequest.Request, error) {
+	requestObj := clientrequest.NewRequest(conn, "socks5")
+	defer func(requestObj *clientrequest.Request) {
 		requestObj.Close()
 	}(&requestObj)
 

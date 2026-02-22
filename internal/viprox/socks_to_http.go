@@ -18,8 +18,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slickproxy/internal/clientrequest"
 	"slickproxy/internal/config"
-	"slickproxy/internal/request"
 	"slickproxy/internal/utils"
 	"strconv"
 	"strings"
@@ -546,7 +546,7 @@ func (adapter *SOCKS5ToHTTPAdapter) HandleClientOverHTTP(Type string, req *http.
 	return nil, isHttp
 }
 
-func (adapter *SOCKS5ToHTTPAdapter) HandleClient(rv *request.Request) error {
+func (adapter *SOCKS5ToHTTPAdapter) HandleClient(rv *clientrequest.Request) error {
 
 	statrtTime := time.Now()
 	_, isHttp := adapter.HandleClientOverHTTP(rv.Type, rv.RawRequest, rv.Conn, &net.TCPAddr{IP: net.ParseIP("0.0.0.0"), Port: 0})

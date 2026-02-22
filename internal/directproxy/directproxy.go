@@ -6,8 +6,8 @@ import (
 	"net"
 	"os"
 	"slickproxy/internal/bandwidthtracker"
+	"slickproxy/internal/clientrequest"
 	"slickproxy/internal/dns"
-	"slickproxy/internal/request"
 	"slickproxy/internal/userdb"
 	"slickproxy/internal/utils"
 	"strconv"
@@ -25,7 +25,7 @@ const (
 	ReadTimeout     = 10 * time.Second
 )
 
-func HandleRequestLocal(rv request.Request) error {
+func HandleRequestLocal(rv clientrequest.Request) error {
 	rv.Credentials.UserDetail.TotalQuota = 0
 	trackedConn := bandwidthtracker.NewBandwidthTrackedConnection(&rv)
 	defer trackedConn.Close()
@@ -34,7 +34,7 @@ func HandleRequestLocal(rv request.Request) error {
 	return err
 }
 
-func attemptDirectConnection(rv request.Request) error {
+func attemptDirectConnection(rv clientrequest.Request) error {
 	return createDirectConnection(rv)
 }
 
@@ -135,7 +135,7 @@ func establishTCPConnection(localIP net.IP, localPort int, remoteIP string, remo
 	return conn, nil, fd
 }
 
-func createDirectConnection(rv request.Request) error {
+func createDirectConnection(rv clientrequest.Request) error {
 	rv.Credentials.UserDetail.Dirty = true
 	host, ip, err := resolveIPForRequest(rv)
 	if err != nil {
@@ -180,7 +180,7 @@ func createDirectConnection(rv request.Request) error {
 		return err
 	}
 
-	proxyConn := request.NewProxyConn(dialConn, fd)
+	proxyConn := clientrequest.NewProxyConn(dialConn, fd)
 	defer func() {
 
 	}()
@@ -196,7 +196,7 @@ func createDirectConnection(rv request.Request) error {
 	}
 }
 
-func handleHTTPConnection(rv request.Request, proxyConn request.ProxyConn) error {
+func handleHTTPConnection(rv clientrequest.Request, proxyConn clientrequest.ProxyConn) error {
 	if err := rv.RawRequest.Write(proxyConn.Conn); err != nil {
 		proxyConn.Close()
 		return err
@@ -248,7 +248,7 @@ func copyDataWithIdleTimeout(dst, src net.Conn, timeout time.Duration, shortFirs
 	}
 }
 
-func handleHTTPSConnection(rv request.Request, proxyConn request.ProxyConn) error {
+func handleHTTPSConnection(rv clientrequest.Request, proxyConn clientrequest.ProxyConn) error {
 	if _, err := rv.Conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
 		log.Println("Error writing 200 OK:", err, rv.Domain)
 		proxyConn.Close()
@@ -259,7 +259,7 @@ func handleHTTPSConnection(rv request.Request, proxyConn request.ProxyConn) erro
 	return nil
 }
 
-func handleSOCKS5Connection(rv request.Request, proxyConn request.ProxyConn) error {
+func handleSOCKS5Connection(rv clientrequest.Request, proxyConn clientrequest.ProxyConn) error {
 	tcpAddr := proxyConn.Conn.LocalAddr().(*net.TCPAddr)
 	utils.SetIPZone(tcpAddr)
 	rep := utils.CreateSocks5Response(tcpAddr)
@@ -275,7 +275,7 @@ func handleSOCKS5Connection(rv request.Request, proxyConn request.ProxyConn) err
 
 var num uint64
 
-func resolveIPForRequest(rv request.Request) (string, net.IP, error) {
+func resolveIPForRequest(rv clientrequest.Request) (string, net.IP, error) {
 	var host string
 	var err error
 	var ip net.IP

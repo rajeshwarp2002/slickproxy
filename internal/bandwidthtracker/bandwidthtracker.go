@@ -3,14 +3,14 @@ package bandwidthtracker
 import (
 	"fmt"
 	"net"
+	"slickproxy/internal/clientrequest"
 	"slickproxy/internal/config"
-	"slickproxy/internal/request"
 	"sync/atomic"
 )
 
 type BandwidthTrackedConnection struct {
 	net.Conn
-	rv           *request.Request
+	rv           *clientrequest.Request
 	bytesTracked int64
 }
 
@@ -77,6 +77,6 @@ func (c *BandwidthTrackedConnection) Write(b []byte) (int, error) {
 	return bytesWritten, nil
 }
 
-func NewBandwidthTrackedConnection(rv *request.Request) *BandwidthTrackedConnection {
+func NewBandwidthTrackedConnection(rv *clientrequest.Request) *BandwidthTrackedConnection {
 	return &BandwidthTrackedConnection{Conn: rv.Conn, rv: rv}
 }

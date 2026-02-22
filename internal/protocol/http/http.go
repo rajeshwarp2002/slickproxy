@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slickproxy/internal/clientrequest"
 	"slickproxy/internal/config"
 	"slickproxy/internal/directproxy"
-	"slickproxy/internal/request"
 	"slickproxy/internal/upstream"
 	"slickproxy/internal/userdb"
 
@@ -35,21 +35,6 @@ var rateLimitExceededResponse = []byte(
 		"\r\n" +
 		"Rate limit exceeded: you have reached your maximum allowed speed.\r\n",
 )
-
-func validateIPAuthentication(requestObj *request.Request, parsedRequest *http.Request) error {
-	return nil
-}
-
-func getClientIPFromRequest(conn net.Conn, parsedRequest *http.Request) string {
-	forwardedForHeader := parsedRequest.Header.Get("X-Forwarded-For")
-	if forwardedForHeader != "" {
-		return strings.TrimSpace(strings.Split(forwardedForHeader, ",")[0])
-	}
-
-	remoteAddr := conn.RemoteAddr().String()
-	clientIPAddress, _, _ := net.SplitHostPort(remoteAddr)
-	return clientIPAddress
-}
 
 func isIPInUserWhitelist(ipAddress net.IP, user *userdb.User) bool {
 	ipAddressStr := ipAddress.String()
@@ -83,7 +68,7 @@ func decodeBase64Auth(authHeader string, isBase64Encoded bool) string {
 
 	return decodedAuthString
 }
-func readProxyAuthHeader(requestObj *request.Request, parsedRequest *http.Request) (string, error) {
+func readProxyAuthHeader(requestObj *clientrequest.Request, parsedRequest *http.Request) (string, error) {
 	authHeader := parsedRequest.Header.Get("Proxy-Authorization")
 	if authHeader == "" {
 		requestObj.Conn.Write(proxyAuthenticationRequiredResponse)
@@ -96,7 +81,7 @@ func readProxyAuthHeader(requestObj *request.Request, parsedRequest *http.Reques
 	return decodedCredentials, nil
 }
 
-func validateProxyAuthorization(requestObj *request.Request, parsedRequest *http.Request, dataStore userdb.DataStore) error {
+func validateProxyAuthorization(requestObj *clientrequest.Request, parsedRequest *http.Request, dataStore userdb.DataStore) error {
 	decodedCredentials, err := readProxyAuthHeader(requestObj, parsedRequest)
 	if err != nil {
 		return err
@@ -163,7 +148,7 @@ func isUserIPPortAuthorized(user *userdb.User, localIP net.IP, localPort uint16)
 	return true
 }
 
-func PerformProxyAuthenticationValidation(requestObj *request.Request, decodedCredentials string, dataStore userdb.DataStore) error {
+func PerformProxyAuthenticationValidation(requestObj *clientrequest.Request, decodedCredentials string, dataStore userdb.DataStore) error {
 	requestObj.Credentials.ParseAuthentication(decodedCredentials)
 
 	credentialsKey := fmt.Sprintf("%s:%s", requestObj.Credentials.User, requestObj.Credentials.Password)
@@ -221,10 +206,10 @@ var forbiddenAccessResponse = []byte(
 		"Forbidden: You do not have permission to access this resource.\r\n",
 )
 
-func HandleHTTPRequest(reader *bufio.Reader, conn net.Conn, dataStore userdb.DataStore) (request.Request, error) {
-	requestObj := request.NewRequest(conn, "http")
+func HandleHTTPRequest(reader *bufio.Reader, conn net.Conn, dataStore userdb.DataStore) (clientrequest.Request, error) {
+	requestObj := clientrequest.NewRequest(conn, "http")
 
-	defer func(requestObj *request.Request) {
+	defer func(requestObj *clientrequest.Request) {
 		requestObj.Close()
 
 	}(&requestObj)
@@ -271,7 +256,7 @@ func HandleHTTPRequest(reader *bufio.Reader, conn net.Conn, dataStore userdb.Dat
 	return requestObj, nil
 }
 
-func validateDomainBlacklist(requestObj *request.Request, dataStore userdb.DataStore) error {
+func validateDomainBlacklist(requestObj *clientrequest.Request, dataStore userdb.DataStore) error {
 	if requestObj.RawRequest != nil {
 		if err := userdb.IsDomainBlacklisted(requestObj.RawRequest.Host, dataStore.GlobalBlacklistDomains); err != nil {
 			return err

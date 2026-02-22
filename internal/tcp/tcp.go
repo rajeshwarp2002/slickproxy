@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"slickproxy/internal/clientrequest"
 	"slickproxy/internal/config"
 	"slickproxy/internal/protocol/http"
 	"slickproxy/internal/protocol/socks5"
-	"slickproxy/internal/request"
 	"slickproxy/internal/stats"
 	"slickproxy/internal/userdb"
 	"strconv"
@@ -111,7 +111,7 @@ func handleConnection(c net.Conn) {
 		statsReq.ClientIP = c.RemoteAddr().String()
 	}
 
-	rv := request.NewRequest(c, "http")
+	rv := clientrequest.NewRequest(c, "http")
 
 	if isSocks5Request(buf) {
 		rv, err = socks5.HandleSOCKS5Connection(reader, c, dataStore)

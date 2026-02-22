@@ -3,8 +3,8 @@ package upstream
 import (
 	"fmt"
 	"math/rand"
+	"slickproxy/internal/clientrequest"
 	"slickproxy/internal/config"
-	"slickproxy/internal/request"
 	"slickproxy/internal/session_cache"
 	"time"
 )
@@ -15,7 +15,7 @@ func init() {
 
 var cache *session_cache.HeapCache
 
-func GenerateProxy(rv *request.Request) error {
+func GenerateProxy(rv *clientrequest.Request) error {
 	if cache == nil {
 		cache = session_cache.NewHeapCache(config.Cfg.Server.MaxSessions)
 	}

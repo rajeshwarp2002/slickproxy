@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"slickproxy/internal/bandwidthtracker"
+	"slickproxy/internal/clientrequest"
 	"slickproxy/internal/config"
-	"slickproxy/internal/request"
 	"slickproxy/internal/userdb"
 	"slickproxy/internal/utils"
 	"slickproxy/internal/viprox"
@@ -32,7 +32,7 @@ func GetRandomProxy() config.ProxyConfigEntry {
 	return config.Cfg.ProxyTable[idx]
 }
 
-func connectViaViprox(rv *request.Request) error {
+func connectViaViprox(rv *clientrequest.Request) error {
 	if atomic.LoadInt64(rv.Credentials.UserDetail.CurrentActiveConnections) == 0 {
 
 		if atomic.LoadInt64(rv.Credentials.UserDetail.CurrentActiveConnections) == 0 {
@@ -61,7 +61,7 @@ func connectViaViprox(rv *request.Request) error {
 
 }
 
-func HandleRequestUpstream(rv *request.Request) error {
+func HandleRequestUpstream(rv *clientrequest.Request) error {
 	trackedConn := bandwidthtracker.NewBandwidthTrackedConnection(rv)
 	defer trackedConn.Close()
 	rv.Conn = trackedConn
@@ -72,7 +72,7 @@ func HandleRequestUpstream(rv *request.Request) error {
 	return attemptUpstreamConnection(rv)
 }
 
-func attemptUpstreamConnection(rv *request.Request) error {
+func attemptUpstreamConnection(rv *clientrequest.Request) error {
 	var lastErr error
 	for attempt := 1; attempt <= config.Cfg.Server.Retry.MaxRetries; attempt++ {
 		err := createUpstreamConnection(rv)
@@ -86,7 +86,7 @@ func attemptUpstreamConnection(rv *request.Request) error {
 	return fmt.Errorf("upstream connection failed after %d retry attempts: last error: %v", config.Cfg.Server.Retry.MaxRetries, lastErr)
 }
 
-func ComputeUpstreamProxy(req *request.Request) error {
+func ComputeUpstreamProxy(req *clientrequest.Request) error {
 
 	req.UpstreamProxy = GetRandomProxy()
 
@@ -94,7 +94,7 @@ func ComputeUpstreamProxy(req *request.Request) error {
 
 	return nil
 }
-func createUpstreamConnection(rv *request.Request) error {
+func createUpstreamConnection(rv *clientrequest.Request) error {
 	var err error
 
 	var port int
@@ -147,7 +147,7 @@ func createUpstreamConnection(rv *request.Request) error {
 	return forwardProxyData(rv, proxyConn)
 }
 
-func ReplaceUserPartPrefix(rv *request.Request, newFirst string) bool {
+func ReplaceUserPartPrefix(rv *clientrequest.Request, newFirst string) bool {
 	userPart := rv.Credentials.UserPart
 
 	if !strings.Contains(userPart, "-rc_") {
@@ -163,7 +163,7 @@ func ReplaceUserPartPrefix(rv *request.Request, newFirst string) bool {
 	return true
 }
 
-func establishProxyConnection(rv *request.Request) (request.ProxyConn, error) {
+func establishProxyConnection(rv *clientrequest.Request) (clientrequest.ProxyConn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -179,12 +179,12 @@ func establishProxyConnection(rv *request.Request) (request.ProxyConn, error) {
 	}
 
 	if err != nil {
-		return request.ProxyConn{}, fmt.Errorf("failed to establish connection to proxy at %s: %v", rv.UpstreamProxy.Key, err)
+		return clientrequest.ProxyConn{}, fmt.Errorf("failed to establish connection to proxy at %s: %v", rv.UpstreamProxy.Key, err)
 	}
-	return request.ProxyConn{Conn: conn}, nil
+	return clientrequest.ProxyConn{Conn: conn}, nil
 }
 
-func connectViaSocks5Protocol(proxyAddress string, rv *request.Request) (net.Conn, error) {
+func connectViaSocks5Protocol(proxyAddress string, rv *clientrequest.Request) (net.Conn, error) {
 	var auth *proxy.Auth
 	auth = &proxy.Auth{
 		User:     rv.Credentials.UserPart,
@@ -201,14 +201,14 @@ func connectViaSocks5Protocol(proxyAddress string, rv *request.Request) (net.Con
 	return dialer.Dial("tcp", rv.Host)
 }
 
-func forwardProxyData(rv *request.Request, proxyConn request.ProxyConn) error {
+func forwardProxyData(rv *clientrequest.Request, proxyConn clientrequest.ProxyConn) error {
 	if rv.Type == "http" {
 		return routeHTTPTraffic(rv, proxyConn)
 	}
 	return routeSocksTraffic(rv, proxyConn)
 }
 
-func routeHTTPTraffic(rv *request.Request, proxyConn request.ProxyConn) error {
+func routeHTTPTraffic(rv *clientrequest.Request, proxyConn clientrequest.ProxyConn) error {
 	if rv.UpstreamProxy.Socks5 {
 		if rv.RawRequest.Method == "CONNECT" {
 			return relayHTTPSOverSocks5(rv, proxyConn)
@@ -222,12 +222,12 @@ func routeHTTPTraffic(rv *request.Request, proxyConn request.ProxyConn) error {
 	return relayHTTPOverHTTP(rv, proxyConn)
 }
 
-func routeSocksTraffic(rv *request.Request, proxyConn request.ProxyConn) error {
+func routeSocksTraffic(rv *clientrequest.Request, proxyConn clientrequest.ProxyConn) error {
 
 	return relaySOCKS5OverSocks5(rv, proxyConn)
 }
 
-func relayHTTPSOverSocks5(rv *request.Request, conn request.ProxyConn) error {
+func relayHTTPSOverSocks5(rv *clientrequest.Request, conn clientrequest.ProxyConn) error {
 	if _, err := rv.Conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
 		return fmt.Errorf("failed to send HTTPS tunnel establishment response to SOCKS5 client: %v", err)
 	}
@@ -236,7 +236,7 @@ func relayHTTPSOverSocks5(rv *request.Request, conn request.ProxyConn) error {
 	return nil
 }
 
-func relayHTTPOverSocks5(rv *request.Request, proxyConn request.ProxyConn) error {
+func relayHTTPOverSocks5(rv *clientrequest.Request, proxyConn clientrequest.ProxyConn) error {
 	if err := rv.RawRequest.WriteProxy(proxyConn.Conn); err != nil {
 		return fmt.Errorf("failed to forward HTTP request through SOCKS5 proxy: %v", err)
 	}
@@ -245,7 +245,7 @@ func relayHTTPOverSocks5(rv *request.Request, proxyConn request.ProxyConn) error
 	return nil
 }
 
-func relayHTTPOverHTTP(rv *request.Request, proxyConn request.ProxyConn) error {
+func relayHTTPOverHTTP(rv *clientrequest.Request, proxyConn clientrequest.ProxyConn) error {
 	addProxyAuthHeaders(rv)
 	if err := rv.RawRequest.WriteProxy(proxyConn.Conn); err != nil {
 		return fmt.Errorf("failed to send HTTP request to upstream HTTP proxy: %v", err)
@@ -262,7 +262,7 @@ func relayHTTPOverHTTP(rv *request.Request, proxyConn request.ProxyConn) error {
 	return nil
 }
 
-func relayHTTPSOverHTTP(rv *request.Request, proxyConn request.ProxyConn) error {
+func relayHTTPSOverHTTP(rv *clientrequest.Request, proxyConn clientrequest.ProxyConn) error {
 	if err := sendProxyConnectRequest(proxyConn, rv); err != nil {
 		return err
 	}
@@ -284,7 +284,7 @@ func relayHTTPSOverHTTP(rv *request.Request, proxyConn request.ProxyConn) error 
 	return nil
 }
 
-func relaySOCKS5OverSocks5(rv *request.Request, proxyConn request.ProxyConn) error {
+func relaySOCKS5OverSocks5(rv *clientrequest.Request, proxyConn clientrequest.ProxyConn) error {
 	tcpAddr := proxyConn.Conn.LocalAddr().(*net.TCPAddr)
 	utils.SetIPZone(tcpAddr)
 	rep := utils.CreateSocks5Response(tcpAddr)
@@ -331,7 +331,7 @@ func copyDataWithIdleTimeout(dst, src net.Conn, timeout time.Duration) {
 	}
 }
 
-func sendProxyConnectRequest(proxyConn request.ProxyConn, rv *request.Request) error {
+func sendProxyConnectRequest(proxyConn clientrequest.ProxyConn, rv *clientrequest.Request) error {
 	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", rv.Host, rv.Host)
 	if rv.UpstreamProxy.Username != "" && rv.UpstreamProxy.Password != "" {
 		auth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", rv.Credentials.UserPart, rv.UpstreamProxy.Password)))
@@ -342,7 +342,7 @@ func sendProxyConnectRequest(proxyConn request.ProxyConn, rv *request.Request) e
 	return err
 }
 
-func addProxyAuthHeaders(rv *request.Request) {
+func addProxyAuthHeaders(rv *clientrequest.Request) {
 	if rv.UpstreamProxy.Username != "" && rv.UpstreamProxy.Password != "" {
 		credentials := fmt.Sprintf("%s:%s", rv.Credentials.UserPart, rv.UpstreamProxy.Password)
 		encodedAuth := base64.StdEncoding.EncodeToString([]byte(credentials))
