@@ -50,6 +50,20 @@ CREATE TABLE blacklist (
 CREATE TABLE listenports (
     port INT NOT NULL UNIQUE
 );
+ALTER TABLE slickproxy.users MODIFY COLUMN user VARCHAR(100) NOT NULL;
+ALTER TABLE slickproxy.users
+MODIFY proxyIP VARCHAR(45) NOT NULL DEFAULT '',
+MODIFY activeConnections INT NOT NULL DEFAULT 0,
+MODIFY connectionsPerSecond INT NOT NULL DEFAULT 0,
+MODIFY throughputPerSecond INT NOT NULL DEFAULT 0,
+MODIFY totalQuota INT NOT NULL DEFAULT 0,
+MODIFY quotaDuration VARCHAR(10) NOT NULL DEFAULT '',
+MODIFY timeQuota INT NOT NULL DEFAULT 0,
+MODIFY ipMode VARCHAR(20) NOT NULL DEFAULT '',
+MODIFY ipRotation VARCHAR(20) NOT NULL DEFAULT '',
+MODIFY rotationIntervalSec INT NOT NULL DEFAULT 0;
+
+
 
 -- Insert some sample ports
 INSERT INTO listenports (port) VALUES (4567);
