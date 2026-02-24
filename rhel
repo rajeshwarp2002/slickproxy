@@ -90,7 +90,9 @@ sudo dnf install clickhouse-server clickhouse-client -y --nogpgcheck
 sudo systemctl enable clickhouse-server
 sudo systemctl start clickhouse-server
 sudo systemctl status clickhouse-server
-
+ sudo chown -R clickhouse:clickhouse /var/log/clickhouse-server
+ sudo chmod 750 /var/log/clickhouse-server
+sudo chmod 640 /var/log/clickhouse-server/*.log
 # Allow ClickHouse ports
 sudo iptables -I INPUT -p tcp --dport 9000 -j ACCEPT
 sudo iptables -I INPUT -p tcp --dport 8123 -j ACCEPT
@@ -137,6 +139,8 @@ sudo iptables -I INPUT -p tcp --dport 8086 -j ACCEPT   # InfluxDB
 sudo iptables -I INPUT -p tcp --dport 9000 -j ACCEPT   # ClickHouse
 sudo iptables -I INPUT -p tcp --dport 8123 -j ACCEPT   # ClickHouse HTTP
 sudo iptables-save | sudo tee /etc/sysconfig/iptables
+
+sudo chmod 755 /usr/bin/curl
 
 
 
