@@ -1,11 +1,12 @@
-sudo tee /etc/sysctl.d/99-custom-tuning.conf <<EOF
+sudo tee -a /etc/sysctl.conf <<EOF
 net.core.somaxconn = 65535
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 10
 net.ipv4.ip_local_port_range = 1024 65535
+net.netfilter.nf_conntrack_max = 10000000
 EOF
 
-sudo sysctl --system
+sudo sysctl -p
 
 
 # Create directory for slickproxy
