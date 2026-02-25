@@ -23,6 +23,7 @@ type Config struct {
 	SamePeerRetryAttempts   int    `json:"same_peer_retry_attempts"`
 	IdlePeerTimeout         int    `json:"idle_peer_timeout"`
 	ConnectTimeout          int    `json:"connect_timeout"`
+	UsePortToIpMapping      bool   `json:"use_port_to_ip_mapping"`
 }
 
 func LoadConfigOrDefault(path string) *Config {

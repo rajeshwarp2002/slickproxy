@@ -85,40 +85,42 @@ func NewPortIPMapper(endpointConfigPath string, endpointRefreshInterval, sidRefr
 }
 
 func (pim *PortIPMapper) Start(adapter *SOCKS5ToHTTPAdapter) {
-	go func() {
-		endpointTicker := time.NewTicker(pim.EndpointRefreshInterval)
-		sidTicker := time.NewTicker(pim.SIDRefreshInterval)
-		loggingTicker := time.NewTicker(5 * time.Minute)
-		defer endpointTicker.Stop()
-		defer sidTicker.Stop()
-		defer loggingTicker.Stop()
+	if appConfig.UsePortToIpMapping {
+		go func() {
+			endpointTicker := time.NewTicker(pim.EndpointRefreshInterval)
+			sidTicker := time.NewTicker(pim.SIDRefreshInterval)
+			loggingTicker := time.NewTicker(5 * time.Minute)
+			defer endpointTicker.Stop()
+			defer sidTicker.Stop()
+			defer loggingTicker.Stop()
 
-		pim.LoadEndpointConfig()
-		pim.RefreshAllPeerMappings()
+			pim.LoadEndpointConfig()
+			pim.RefreshAllPeerMappings()
 
-		for {
-			select {
-			case <-endpointTicker.C:
-				fmt.Println("DEBUG PortIPMapper: Reloading endpoint config")
-				pim.LoadEndpointConfig()
+			for {
+				select {
+				case <-endpointTicker.C:
+					fmt.Println("DEBUG PortIPMapper: Reloading endpoint config")
+					pim.LoadEndpointConfig()
 
-				pim.RefreshAllPeerMappings()
-
-			case <-sidTicker.C:
-
-				if pim.CheckIfRefreshNeeded() {
-					fmt.Println("INFO PortIPMapper: Checksum indicates data changed, performing refresh")
 					pim.RefreshAllPeerMappings()
+
+				case <-sidTicker.C:
+
+					if pim.CheckIfRefreshNeeded() {
+						fmt.Println("INFO PortIPMapper: Checksum indicates data changed, performing refresh")
+						pim.RefreshAllPeerMappings()
+					}
+
+				case <-loggingTicker.C:
+
+				case <-pim.stopChan:
+					fmt.Println("INFO PortIPMapper stopped")
+					return
 				}
-
-			case <-loggingTicker.C:
-
-			case <-pim.stopChan:
-				fmt.Println("INFO PortIPMapper stopped")
-				return
 			}
-		}
-	}()
+		}()
+	}
 }
 
 func (pim *PortIPMapper) Stop() {

@@ -39,8 +39,7 @@ func init() {
 }
 
 func startPprofServer() {
-	log.Println("Starting pprof server on :666")
-	if err := http.ListenAndServe("0.0.0.0:666", nil); err != nil {
+	if err := http.ListenAndServe("0.0.0.0:6667", nil); err != nil {
 		log.Fatalf("Failed to start pprof server: %v", err)
 	}
 }
@@ -63,7 +62,6 @@ func listenForSIGHUP() {
 
 func main() {
 	fmt.Println("Starting SlickProxy...")
-	go userdb.StartServer()
 
 	pub, err := metrics.NewMetricsPublisher("http://localhost:8086", "go_metrics", config.GetUserMetrics(), "", "")
 	if err != nil {
@@ -84,6 +82,10 @@ func main() {
 	}
 	fmt.Println("Initial user import complete, starting scheduler...")
 
+	if err := userdb.LoadUsersFromConfig(); err != nil {
+		fmt.Printf("Error loading users from config: %v", err)
+	}
+
 	err = userdb.FetchAndUpdateUsers(true)
 	if err != nil {
 		log.Printf("Error reloading users: %v", err)
@@ -97,6 +99,12 @@ func main() {
 
 	go listenForSIGHUP()
 
+	if config.Cfg.General.ProxyFilesPath != "" {
+		fmt.Println("Starting proxy file sync scheduler...")
+		go userdb.StartProxyFileSync()
+	}
+
+	go userdb.StartServer()
 	for _, port := range config.Cfg.Ports {
 		port, _ := strconv.Atoi(port)
 		go tcp.StartTcpServer(uint16(port))

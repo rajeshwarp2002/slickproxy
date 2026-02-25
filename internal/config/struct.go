@@ -109,17 +109,25 @@ type ProxyConfigEntry struct {
 	RateLimiter *RateLimiter
 	IsRemote    bool
 }
+
+type ConfigUser struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
 type Config struct {
 	General struct {
-		Log               string `json:"log"`
-		LB                bool   `json:"lb"`
-		TrackUsage        bool   `json:"trackusage"`
-		Cluster           bool   `json:"cluster"`
-		DNSServer         string `json:"dns_server"`
-		Viprox            bool   `json:"viprox"`
-		Viprox_auth       bool   `json:"viprox_auth"`
-		Viprox_log        bool   `json:"viprox_log"`
-		Viprox_users_file string `json:"viprox_users_file"`
+		Log                  string `json:"log"`
+		LB                   bool   `json:"lb"`
+		TrackUsage           bool   `json:"trackusage"`
+		Cluster              bool   `json:"cluster"`
+		DNSServer            string `json:"dns_server"`
+		Viprox               bool   `json:"viprox"`
+		Viprox_auth          bool   `json:"viprox_auth"`
+		Viprox_log           bool   `json:"viprox_log"`
+		Viprox_users_file    string `json:"viprox_users_file"`
+		ProxyFilesPath       string `json:"proxy_files_path"`
+		ProxyFilesRegex      string `json:"proxy_files_regex"`
+		RefreshUsersInterval int    `json:"refresh_users_interval"`
 	} `json:"general"`
 	DB struct {
 		Connection  string `json:"connection"`
@@ -135,6 +143,7 @@ type Config struct {
 	Ports   []string           `json:"ports"`
 	Subnets []string           `json:"subnets"`
 	Proxies []ProxyConfigEntry `json:"proxies"`
+	Users   []ConfigUser       `json:"users"`
 
 	ProxyTable []ProxyConfigEntry
 }

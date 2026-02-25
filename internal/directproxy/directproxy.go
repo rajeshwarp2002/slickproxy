@@ -145,7 +145,7 @@ func createDirectConnection(rv clientrequest.Request) error {
 	if atomic.LoadInt64(rv.Credentials.UserDetail.CurrentActiveConnections) == 0 {
 
 		if atomic.LoadInt64(rv.Credentials.UserDetail.CurrentActiveConnections) == 0 {
-			atomic.StoreInt64(&config.UserMetricsObj.ActiveUsers, 1)
+			atomic.AddInt64(&config.UserMetricsObj.ActiveUsers, 1)
 		}
 	}
 	defer func() {
@@ -153,7 +153,7 @@ func createDirectConnection(rv clientrequest.Request) error {
 		if atomic.LoadInt64(rv.Credentials.UserDetail.CurrentActiveConnections) == 0 {
 
 			if atomic.LoadInt64(rv.Credentials.UserDetail.CurrentActiveConnections) == 0 {
-				atomic.StoreInt64(&config.UserMetricsObj.ActiveUsers, -1)
+				atomic.AddInt64(&config.UserMetricsObj.ActiveUsers, -1)
 			}
 
 		}

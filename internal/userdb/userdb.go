@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"regexp"
 	"slickproxy/internal/config"
 	"strconv"
 	"strings"
@@ -23,6 +24,14 @@ var Ports []int
 var Users *map[string]*User
 var GlobalBlacklistDomains *map[string]struct{}
 var GlobalBlacklistPorts *map[string]struct{}
+
+type IPToUserCredentials struct {
+	User     string
+	Password string
+}
+
+var WhitelistIPMap *map[string]IPToUserCredentials // Maps whitelisted IP -> user credentials
+var WhitelistIPMapMutex sync.RWMutex
 
 type DataStore struct {
 	Users                  *map[string]*User
@@ -146,28 +155,34 @@ func FetchAndUpdateUsers(start bool) error {
 	}
 	defer db.Close()
 
-	rows, err := db.Query("SELECT port FROM listenports")
+	// This is where connection errors are actually caught
+	if err := db.Ping(); err != nil {
+		return fmt.Errorf("failed to connect to database: %v", err)
+	}
+
+	portRows, err := db.Query("SELECT port FROM listenports")
 	if err != nil {
 		log.Println("no listen ports configured", err)
 		log.Println(err)
+	} else {
+		defer portRows.Close()
 	}
-	defer rows.Close()
 
-	for rows.Next() {
+	for portRows != nil && portRows.Next() {
 		var port int
-		if err := rows.Scan(&port); err != nil {
+		if err := portRows.Scan(&port); err != nil {
 			log.Println(err)
 		}
 
 		Ports = append(Ports, port)
 	}
 
-	if err := rows.Err(); err != nil {
+	if err := portRows.Err(); err != nil {
 		log.Println(err)
 	}
 
 	query := "SELECT * FROM users"
-	rows, err = db.Query(query)
+	rows, err := db.Query(query)
 	if err != nil {
 		return fmt.Errorf("error querying database for users: %v", err)
 	}
@@ -318,6 +333,9 @@ func FetchAndUpdateUsers(start bool) error {
 		return fmt.Errorf("error iterating over rows for global blacklist: %v", err)
 	}
 
+	// Build whitelist IP map before swapping Users
+	BuildWhitelistIPMap(users)
+
 	Users = &users
 	GlobalBlacklistDomains = &globalBlacklistDomains
 	GlobalBlacklistPorts = &globalBlacklistPorts
@@ -327,11 +345,37 @@ func FetchAndUpdateUsers(start bool) error {
 	return nil
 }
 
+func BuildWhitelistIPMap(usersMap map[string]*User) {
+	whitelistIPMap := make(map[string]IPToUserCredentials)
+	for _, user := range usersMap {
+		// Parse whitelisted IPs from user's WhiteListIP slice
+		for _, ip := range user.WhiteListIP {
+			ip = strings.TrimSpace(ip)
+			if ip != "" {
+				whitelistIPMap[ip] = IPToUserCredentials{
+					User:     user.User,
+					Password: user.Password,
+				}
+			}
+		}
+	}
+
+	// Update global whitelist IP map with lock
+	WhitelistIPMapMutex.Lock()
+	WhitelistIPMap = &whitelistIPMap
+	WhitelistIPMapMutex.Unlock()
+
+	log.Printf("Whitelist IP map built with %d entries", len(whitelistIPMap))
+}
+
 func IsDomainBlacklisted(domain string, blacklistDomains *map[string]struct{}) error {
 
 	parts := strings.Split(domain, ":")
 	domainWithoutPort := parts[0]
 
+	if blacklistDomains == nil {
+		return nil
+	}
 	if _, exists := (*blacklistDomains)[domainWithoutPort]; exists {
 		return errors.New("domain is blacklisted")
 	}
@@ -339,6 +383,10 @@ func IsDomainBlacklisted(domain string, blacklistDomains *map[string]struct{}) e
 }
 
 func IsPortBlacklisted(port string, blacklistPorts *map[string]struct{}) error {
+
+	if blacklistPorts == nil {
+		return nil
+	}
 
 	if _, exists := (*blacklistPorts)[port]; exists {
 		return errors.New("port is blacklisted")
@@ -458,10 +506,15 @@ func checkFDUsage() error {
 	return nil
 }
 
-var cutoff = time.Date(2026, time.March, 1, 0, 0, 0, 0, time.UTC)
+var cutoff = time.Date(2026, time.March, 5, 0, 0, 0, 0, time.UTC)
 
 func RefreshUsersData() {
-	ticker := time.NewTicker(1 * time.Minute)
+	// Use configured interval in seconds, default to 1 minute
+	intervalSeconds := 60
+	if config.Cfg.General.RefreshUsersInterval > 0 {
+		intervalSeconds = config.Cfg.General.RefreshUsersInterval
+	}
+	ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -496,6 +549,7 @@ func ImportUsersFromFile() error {
 	lines := strings.Split(string(content), "\n")
 	insertCount := 0
 	skipCount := 0
+	erroCount := 0
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -513,17 +567,11 @@ func ImportUsersFromFile() error {
 		username := parts[0]
 		password := parts[1]
 
-		query := "INSERT INTO users (user, password) VALUES (?, ?)"
-		result, err := db.Exec(query, username, password)
+		query := "INSERT INTO users (user, password) VALUES (?, ?) ON DUPLICATE KEY UPDATE password = ?"
+		result, err := db.Exec(query, username, password, password)
 		if err != nil {
-
-			if strings.Contains(err.Error(), "Duplicate entry") || strings.Contains(err.Error(), "1062") {
-
-				skipCount++
-				continue
-			}
-			fmt.Printf("Error inserting user %s: %v\n", username, err)
-			skipCount++
+			erroCount++
+			fmt.Printf("Error inserting/updating user %s: %v\n", username, err)
 			continue
 		}
 
@@ -531,6 +579,76 @@ func ImportUsersFromFile() error {
 		if err == nil && rowsAffected > 0 {
 			insertCount++
 		}
+	}
+	fmt.Printf("User import complete: %d inserted, %d skipped, %d errors\n", insertCount, skipCount, erroCount)
+
+	return nil
+}
+
+func LoadUsersFromConfig() error {
+	if config.Cfg == nil || len(config.Cfg.Users) == 0 {
+		return nil
+	}
+
+	usersLocal := Users
+	if usersLocal == nil {
+		//return fmt.Errorf("Users map not initialized")
+		// initialize the Users map if it's nil
+		usersLocal = &map[string]*User{}
+		Users = usersLocal
+	}
+
+	for _, configUser := range config.Cfg.Users {
+		if configUser.Username == "" || configUser.Password == "" {
+			fmt.Printf("Skipping user with empty username or password\n")
+			continue
+		}
+
+		key := fmt.Sprintf("%s:%s", configUser.Username, configUser.Password)
+
+		// Check if user already exists
+		if _, exists := (*usersLocal)[key]; exists {
+			continue
+		}
+
+		// Create user with default values
+		ActiveConnections := int64(0)
+		TotalUsedBytes := int64(0)
+		TotalUsedBytesLastSec := int64(0)
+
+		user := &User{
+			User:                           configUser.Username,
+			Password:                       configUser.Password,
+			ProxyIPListv4:                  []string{},
+			ProxyIPListv6:                  []string{},
+			ProxyPort:                      0,
+			ProxyPortRange:                 [2]uint16{},
+			ActiveConnections:              0,
+			ConnectionsPerSecond:           0,
+			ThroughputPerSecond:            0,
+			TotalQuota:                     0,
+			QuotaDuration:                  "",
+			TimeQuota:                      0,
+			IpMode:                         IPv4Mode,
+			IpRotation:                     "",
+			PortToIP:                       make(map[uint16]string),
+			WhiteListIP:                    []string{},
+			RotationIntervalSec:            0,
+			LastIpTime:                     0,
+			LastIp:                         net.IP{},
+			CurrentActiveConnections:       &ActiveConnections,
+			TotalUsedBytes:                 &TotalUsedBytes,
+			TotalUsedBytesLastSec:          &TotalUsedBytesLastSec,
+			RateLimiter:                    config.NewRateLimiter(0),
+			Dirty:                          false,
+			PersistedUsedBytes:             0,
+			PersistedActiveConnections:     0,
+			PersistedTotalUsedBytesLastSec: 0,
+			ProxyIP:                        "",
+		}
+
+		(*usersLocal)[key] = user
+		fmt.Printf("Loaded user %s from config\n", key)
 	}
 
 	return nil
@@ -563,7 +681,285 @@ func MonitorCPUUsage() {
 
 			if now.After(cutoff) {
 				fmt.Println("Expired: current date is after ", cutoff)
+				//exit
+				//os.Exit(0)
 
+			}
+		}
+	}
+}
+
+var IPAuthMap *map[string]string // Maps IP -> username for AUTHTYPE=ip
+
+type ProxyFileUser struct {
+	AuthToken   string
+	AuthType    string
+	Proxies     []string // List of proxy IPs
+	MainIP      string
+	SrcIPs      []string
+	Username    string
+	Password    string
+	StartTime   string
+	ExpiryHours string
+	DataLimitMB string
+	Email       string
+	CustName    string
+	OrderID     string
+	Rate        string
+	Mark        string
+}
+
+func ParseKeyValueFile(filePath string) (ProxyFileUser, error) {
+	content, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return ProxyFileUser{}, fmt.Errorf("error reading file %s: %v", filePath, err)
+	}
+
+	user := ProxyFileUser{}
+	lines := strings.Split(string(content), "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.Trim(strings.TrimSpace(parts[1]), `"`)
+
+		switch key {
+		case "AUTHTOKEN":
+			user.AuthToken = value
+		case "AUTHTYPE":
+			user.AuthType = value
+		case "PROXIES":
+			// Parse PROXIES: "82.24.15.0:21760=82.24.15.0 82.24.15.1:27994=82.24.15.1 ..."
+			proxyPairs := strings.Fields(value) // Split on whitespace
+			for _, pair := range proxyPairs {
+				pair = strings.TrimSpace(pair)
+				if pair == "" {
+					continue
+				}
+				// Extract IP before the port
+				if strings.Contains(pair, "=") {
+					parts := strings.Split(pair, "=")
+					if len(parts) > 0 {
+						ipPort := parts[0]
+						if strings.Contains(ipPort, ":") {
+							ip := strings.Split(ipPort, ":")[0]
+							user.Proxies = append(user.Proxies, ip)
+						}
+					}
+				} else if strings.Contains(pair, ":") {
+					ip := strings.Split(pair, ":")[0]
+					user.Proxies = append(user.Proxies, ip)
+				}
+			}
+		case "MAINIP":
+			user.MainIP = value
+		case "SRCIPS":
+			user.SrcIPs = strings.Fields(value) // Split on whitespace
+		case "USERNAME":
+			user.Username = value
+		case "PASSWORD":
+			user.Password = value
+		case "STARTTIME":
+			user.StartTime = value
+		case "EXPIRYHOURS":
+			user.ExpiryHours = value
+		case "DATALIMITMB":
+			user.DataLimitMB = value
+		case "EMAIL":
+			user.Email = value
+		case "CUSTNAME":
+			user.CustName = value
+		case "ORDERID":
+			user.OrderID = value
+		case "RATE":
+			user.Rate = value
+		case "MARK":
+			user.Mark = value
+		}
+	}
+
+	// If username is blank and authtype is "ip", use first source IP as both username and password
+	if strings.ToLower(user.AuthType) == "ip" {
+		if user.Username == "" && len(user.SrcIPs) > 0 && strings.TrimSpace(user.SrcIPs[0]) != "" {
+			srcIP := strings.TrimSpace(user.SrcIPs[0])
+			user.Username = srcIP
+			user.Password = srcIP
+			log.Printf("Set username and password to source IP: %s", srcIP)
+		}
+	} else {
+		// Clear SrcIPs if not using IP-based auth
+		user.SrcIPs = []string{}
+	}
+
+	return user, nil
+}
+
+func ParseProxyFilesDirectory() ([]ProxyFileUser, error) {
+	path := config.Cfg.General.ProxyFilesPath
+	if path == "" {
+		return nil, fmt.Errorf("proxy_files_path not configured")
+	}
+
+	entries, err := ioutil.ReadDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("error reading directory %s: %v", path, err)
+	}
+
+	// Compile regex filter if configured
+	var fileRegex *regexp.Regexp
+	if config.Cfg.General.ProxyFilesRegex != "" {
+		var regexErr error
+		fileRegex, regexErr = regexp.Compile(config.Cfg.General.ProxyFilesRegex)
+		if regexErr != nil {
+			log.Printf("Warning: Invalid proxy files regex pattern: %v", regexErr)
+		}
+	}
+
+	var users []ProxyFileUser
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		// Apply regex filter if configured
+		if fileRegex != nil && !fileRegex.MatchString(entry.Name()) {
+			log.Printf("Skipping file %s (does not match regex)", entry.Name())
+			continue
+		}
+
+		filePath := fmt.Sprintf("%s/%s", path, entry.Name())
+		user, err := ParseKeyValueFile(filePath)
+		if err != nil {
+			log.Printf("Error parsing file %s: %v", filePath, err)
+			continue
+		}
+
+		if user.Username == "" || user.Password == "" {
+			log.Printf("Skipping file %s: missing username or password", entry.Name())
+			continue
+		}
+
+		users = append(users, user)
+	}
+
+	return users, nil
+}
+
+func SyncProxyFileUsersToDatabase(proxyFileUsers []ProxyFileUser) error {
+	if len(proxyFileUsers) == 0 {
+		return nil
+	}
+
+	dsn := "root:your_password@tcp(" + config.Cfg.DB.Connection + ")/slickproxy"
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return fmt.Errorf("error connecting to database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		return fmt.Errorf("error pinging database: %v", err)
+	}
+
+	// Track processed usernames for deletion
+	processedUsernames := make(map[string]bool)
+	ipAuthMap := make(map[string]string)
+
+	for _, user := range proxyFileUsers {
+		processedUsernames[user.Username] = true
+
+		// Build proxy IP list string
+		proxyIPStr := strings.Join(user.Proxies, ",")
+		// Build source IP list string (for whiteListIP)
+		srcIPStr := strings.Join(user.SrcIPs, ",")
+
+		// Insert or update user
+		query := `
+			INSERT INTO users (user, password, proxyIPList, whiteListIP)
+			VALUES (?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE
+			proxyIPList = VALUES(proxyIPList),
+			whiteListIP = VALUES(whiteListIP)
+		`
+
+		_, err := db.Exec(query,
+			user.Username,
+			user.Password,
+			proxyIPStr,
+			srcIPStr,
+		)
+		if err != nil {
+			log.Printf("Error syncing user %s: %v", user.Username, err)
+			continue
+		}
+
+		// If AUTHTYPE == "ip", build IP->username map (SrcIPs already cleared if not "ip" during parsing)
+		for _, srcIP := range user.SrcIPs {
+			srcIP = strings.TrimSpace(srcIP)
+			if srcIP != "" {
+				ipAuthMap[srcIP] = user.Username
+			}
+		}
+
+		log.Printf("Synced user %s with %d proxy IPs and %d source IPs", user.Username, len(user.Proxies), len(user.SrcIPs))
+	}
+
+	// Update global IP auth map
+	IPAuthMap = &ipAuthMap
+
+	// Delete users that don't have proxy files
+	usersInDB := make(map[string]bool)
+	rows, err := db.Query("SELECT user FROM users WHERE LENGTH(proxyIPList) > 0")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var username string
+			if err := rows.Scan(&username); err == nil {
+				usersInDB[username] = true
+			}
+		}
+	}
+
+	// Delete users that are not in proxy files
+	for username := range usersInDB {
+		if !processedUsernames[username] {
+			deleteQuery := "DELETE FROM users WHERE user = ?"
+			_, err := db.Exec(deleteQuery, username)
+			if err != nil {
+				log.Printf("Error deleting user %s: %v", username, err)
+			} else {
+				log.Printf("Deleted user %s (no proxy file)", username)
+			}
+		}
+	}
+
+	return nil
+}
+
+func StartProxyFileSync() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			users, err := ParseProxyFilesDirectory()
+			if err != nil {
+				log.Printf("Error parsing proxy files: %v", err)
+				continue
+			}
+
+			if err := SyncProxyFileUsersToDatabase(users); err != nil {
+				log.Printf("Error syncing proxy file users: %v", err)
 			}
 		}
 	}

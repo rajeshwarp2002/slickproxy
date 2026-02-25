@@ -397,7 +397,7 @@ func (a *SOCKS5ToHTTPAdapter) resolveProxyAddress(code, sid string, attempt int)
 
 	if sid == "" {
 
-		if attempt <= 1 && code == "rc_all" {
+		if appConfig.UsePortToIpMapping && attempt <= 1 && code == "rc_all" {
 			entry, err := portIPMapper.GetNextDifEndpoint()
 			if err != nil {
 				return "", false, err
@@ -421,7 +421,7 @@ func (a *SOCKS5ToHTTPAdapter) resolveProxyAddress(code, sid string, attempt int)
 		if err != nil {
 			return "", false, fmt.Errorf("invalid sid: %v", err)
 		}
-		if attempt <= 1 && code == "rc_all" {
+		if appConfig.UsePortToIpMapping && attempt <= 1 && code == "rc_all" {
 			entry, err := portIPMapper.GetBySID(sidVal)
 			if err != nil {
 				return "", false, err
@@ -839,6 +839,12 @@ var Adapter *SOCKS5ToHTTPAdapter
 func init() {
 	configPath := "viprox.json"
 
+	// config path is missing, just return
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		fmt.Printf("ERROR config file %s not found, exiting\n", configPath)
+		return
+	}
+
 	const N = 100_000_000
 	BigHolderInstance = NewBigHolder(N)
 	CounterMapInstance = NewCounterMap()
@@ -871,7 +877,7 @@ func init() {
 	Adapter = &SOCKS5ToHTTPAdapter{
 		EndPointConfigPath: appConfig.EndpointConfFile,
 		AccessLog:          accessLogger,
-		LogChan:            make(chan string, 1000),
+		LogChan:            make(chan string, 1000000),
 	}
 
 	parts := strings.Split(appConfig.RemoteProxyPortRange, "-")

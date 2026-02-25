@@ -71,8 +71,20 @@ func decodeBase64Auth(authHeader string, isBase64Encoded bool) string {
 func readProxyAuthHeader(requestObj *clientrequest.Request, parsedRequest *http.Request) (string, error) {
 	authHeader := parsedRequest.Header.Get("Proxy-Authorization")
 	if authHeader == "" {
+		// Try to lookup by client IP in whitelist map (no lock needed - pointer read is atomic)
+		clientIP := requestObj.ClientIp.String()
+		if userdb.WhitelistIPMap != nil {
+			ipCreds, found := (*userdb.WhitelistIPMap)[clientIP]
+			if found {
+				// Found credentials for this IP, combine username:password
+				decodedCredentials := ipCreds.User + ":" + ipCreds.Password
+				log.Printf("Found whitelist IP credentials for %s: %s", clientIP, ipCreds.User)
+				return decodedCredentials, nil
+			}
+		}
+
 		requestObj.Conn.Write(proxyAuthenticationRequiredResponse)
-		return "", fmt.Errorf("no auth header")
+		return "", fmt.Errorf("no auth header and no whitelist IP match for %s", clientIP)
 	}
 	decodedCredentials := decodeBase64Auth(authHeader, true)
 	if decodedCredentials == "" {
@@ -233,8 +245,8 @@ func HandleHTTPRequest(reader *bufio.Reader, conn net.Conn, dataStore userdb.Dat
 
 	requestObj.Domain, requestObj.EndPort, err = net.SplitHostPort(requestObj.Host)
 	if err != nil {
-		requestObj.Host = requestObj.Host + ":80"
 		requestObj.Domain = requestObj.Host
+		requestObj.Host = requestObj.Host + ":80"
 		requestObj.EndPort = "80"
 	}
 

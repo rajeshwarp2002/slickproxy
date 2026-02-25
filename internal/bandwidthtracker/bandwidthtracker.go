@@ -19,9 +19,6 @@ func (c *BandwidthTrackedConnection) Read(b []byte) (int, error) {
 	if err != nil {
 		return bytesRead, err
 	}
-	atomic.AddInt64(&c.rv.Bytes, int64(bytesRead))
-	atomic.AddInt64(&c.rv.InBytes, int64(bytesRead))
-	atomic.AddInt64(&config.UserMetricsObj.Throughput, int64(bytesRead))
 	if config.Cfg.General.TrackUsage {
 		if c.rv.UpstreamProxy.BytesPerSecond != 0 {
 			c.rv.UpstreamProxy.RateLimiter.Write(uint64(bytesRead), true)
@@ -33,6 +30,9 @@ func (c *BandwidthTrackedConnection) Read(b []byte) (int, error) {
 			}
 			c.rv.Credentials.UserDetail.RateLimiter.Write(uint64(bytesRead), c.rv.UpstreamProxy.BytesPerSecond == 0 || isUpstreamBlocked == 1)
 		}
+		atomic.AddInt64(&c.rv.Bytes, int64(bytesRead))
+		atomic.AddInt64(&c.rv.InBytes, int64(bytesRead))
+		atomic.AddInt64(&config.UserMetricsObj.Throughput, int64(bytesRead))
 
 		c.rv.Credentials.UserDetail.Dirty = true
 		totalBytesUsed := atomic.AddInt64(c.rv.Credentials.UserDetail.TotalUsedBytes, int64(bytesRead))
@@ -50,10 +50,6 @@ func (c *BandwidthTrackedConnection) Write(b []byte) (int, error) {
 		return bytesWritten, err
 	}
 
-	atomic.AddInt64(&c.rv.Bytes, int64(bytesWritten))
-	atomic.AddInt64(&c.rv.OutBytes, int64(bytesWritten))
-	atomic.AddInt64(&config.UserMetricsObj.Throughput, int64(bytesWritten))
-
 	if config.Cfg.General.TrackUsage {
 		if c.rv.UpstreamProxy.BytesPerSecond != 0 {
 			c.rv.UpstreamProxy.RateLimiter.Write(uint64(bytesWritten), true)
@@ -66,6 +62,10 @@ func (c *BandwidthTrackedConnection) Write(b []byte) (int, error) {
 			}
 			c.rv.Credentials.UserDetail.RateLimiter.Write(uint64(bytesWritten), c.rv.UpstreamProxy.BytesPerSecond == 0 || isUpstreamBlocked == 1)
 		}
+
+		atomic.AddInt64(&c.rv.Bytes, int64(bytesWritten))
+		atomic.AddInt64(&c.rv.OutBytes, int64(bytesWritten))
+		atomic.AddInt64(&config.UserMetricsObj.Throughput, int64(bytesWritten))
 
 		c.rv.Credentials.UserDetail.Dirty = true
 		totalBytesUsed := atomic.AddInt64(c.rv.Credentials.UserDetail.TotalUsedBytes, int64(bytesWritten))
