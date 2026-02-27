@@ -1,5 +1,6 @@
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o slickproxy main.go
 go install mvdan.cc/garble@latest
+export PATH=$PATH:/root/go/bin
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 garble -literals -tiny build -trimpath -ldflags="-s -w -buildid=" -o slickproxy .
 echo "net.core.somaxconn = 65535" | sudo tee /etc/sysctl.d/99-custom-tuning.conf
 echo "net.ipv4.tcp_tw_reuse = 1"   | sudo tee -a /etc/sysctl.d/99-custom-tuning.conf
