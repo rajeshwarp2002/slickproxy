@@ -208,9 +208,15 @@ func handleIPsWithoutProxyIP(ipList string) error {
 
 // handleSubnetsWithProxyIP handles case when proxyIP is set
 // Adds subnets as routes to local loopback interface
+// Adds individual IPs as /32 to the interface
 func handleSubnetsWithProxyIP(ipList string) error {
 	if ipList == "" {
 		return nil
+	}
+
+	iface, err := getDefaultInterface()
+	if err != nil {
+		return fmt.Errorf("failed to get default interface: %v", err)
 	}
 
 	ips := strings.Split(ipList, ",")
@@ -242,9 +248,28 @@ func handleSubnetsWithProxyIP(ipList string) error {
 				log.Printf("Added subnet route %s", ip)
 			}
 		} else {
-			// It's an IP address - validate it
+			// It's an individual IP - add it as /32 to interface
 			if net.ParseIP(ip) == nil {
 				return fmt.Errorf("invalid IP in proxyIPList: %s", ip)
+			}
+
+			// Check if IP was already added
+			addedIPsMutex.Lock()
+			alreadyAdded := addedIPs[ip]
+			addedIPsMutex.Unlock()
+
+			if !alreadyAdded {
+				// Add IP to interface with /32 mask
+				if err := addIPToInterface(iface, ip); err != nil {
+					return err
+				}
+
+				// Mark IP as added
+				addedIPsMutex.Lock()
+				addedIPs[ip] = true
+				addedIPsMutex.Unlock()
+
+				log.Printf("Added IP %s to interface %s", ip, iface)
 			}
 		}
 	}
