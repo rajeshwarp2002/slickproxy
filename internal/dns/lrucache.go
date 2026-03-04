@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net"
 	"slickproxy/internal/config"
+	"strings"
 	"sync"
 	"time"
 
@@ -131,7 +132,24 @@ func ResolveDNS(domain string, isIPv4 bool) ([]string, time.Duration, error) {
 		dnsServer = "8.8.8.8:53"
 	}
 
-	response, _, err := client.Exchange(message, dnsServer)
+	// Parse CSV string of DNS servers
+	dnsServers := strings.Split(dnsServer, ",")
+	var response *dns.Msg
+	var err error
+
+	// Try each DNS server in order
+	for _, server := range dnsServers {
+		server = strings.TrimSpace(server)
+		if server == "" {
+			continue
+		}
+		response, _, err = client.Exchange(message, server)
+		if err == nil {
+			break
+		}
+		log.Printf("Failed to resolve with DNS server %s: %v, trying next server", server, err)
+	}
+
 	if err != nil {
 		return nil, 0, err
 	}

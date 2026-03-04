@@ -11,9 +11,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"slickproxy/internal/config"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +24,11 @@ import (
 	"github.com/shirou/gopsutil/mem"
 	"golang.org/x/sys/unix"
 )
+
+var addedSubnets = make(map[string]bool)
+var addedSubnetsMutex sync.Mutex
+var addedIPs = make(map[string]bool)
+var addedIPsMutex sync.Mutex
 
 type DB struct {
 	Connection *sql.DB
@@ -67,19 +74,196 @@ func (db *DB) GetMetrics(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(metrics)
 }
 
-func validateIPList(ipList string) error {
-	if ipList != "" {
-		ips := strings.Split(ipList, ",")
-		for _, ip := range ips {
-			if strings.Contains(ip, "/") {
-				ip = strings.Split(ip, "/")[0]
+func getDefaultInterface() (string, error) {
+	// Execute: ip route | grep default | awk '{print $5}' | head -n1
+	cmd := exec.Command("sh", "-c", "ip route | grep default | awk '{print $5}' | head -n1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("failed to get default interface: %v", err)
+	}
+	iface := strings.TrimSpace(string(output))
+	if iface == "" {
+		return "", errors.New("no default interface found")
+	}
+	return iface, nil
+}
+
+func addIPToInterface(iface, ip string) error {
+	// Check if it's a single IP or a subnet
+	if !strings.Contains(ip, "/") {
+		// Single IP - add with /32 mask
+		ip = ip + "/32"
+	}
+
+	cmd := exec.Command("ip", "addr", "add", ip, "dev", iface)
+	if err := cmd.Run(); err != nil {
+		// Check if error is "File exists" which means it's already added
+		if strings.Contains(err.Error(), "File exists") {
+			return nil
+		}
+		return fmt.Errorf("failed to add IP %s to interface %s: %v", ip, iface, err)
+	}
+	return nil
+}
+
+func isIPv4(ip string) bool {
+	// Remove the /xx subnet mask if present
+	ipPart := ip
+	if strings.Contains(ip, "/") {
+		ipPart = strings.Split(ip, "/")[0]
+	}
+	parsedIP := net.ParseIP(ipPart)
+	return parsedIP != nil && parsedIP.To4() != nil
+}
+
+// expandSubnet generates all individual IPs within a CIDR subnet
+func expandSubnet(subnet string) ([]string, error) {
+	_, ipNet, err := net.ParseCIDR(subnet)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CIDR subnet %s: %v", subnet, err)
+	}
+
+	var ips []string
+	for ip := net.ParseIP(ipNet.IP.String()); ipNet.Contains(ip); incrementIP(ip) {
+		ips = append(ips, ip.String())
+	}
+	return ips, nil
+}
+
+// incrementIP increments an IP address by 1
+func incrementIP(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] > 0 {
+			break
+		}
+	}
+}
+
+// handleIPsWithoutProxyIP handles case when proxyIP is blank
+// Adds IPv4 addresses and subnets to the interface that has public IP
+func handleIPsWithoutProxyIP(ipList string) error {
+	iface, err := getDefaultInterface()
+	if err != nil {
+		return fmt.Errorf("failed to get default interface: %v", err)
+	}
+
+	ips := strings.Split(ipList, ",")
+	for _, ip := range ips {
+		ip = strings.TrimSpace(ip)
+
+		// Only process IPv4 addresses and subnets
+		if !isIPv4(ip) {
+			continue
+		}
+
+		var ipsToAdd []string
+
+		// If it's a subnet, expand it into individual IPs
+		if strings.Contains(ip, "/") {
+			// Validate the subnet
+			if !config.ValidateSubnet(ip) {
+				return fmt.Errorf("invalid IPv4 subnet: %s", ip)
 			}
+
+			// Expand subnet into individual IPs
+			expandedIPs, err := expandSubnet(ip)
+			if err != nil {
+				return fmt.Errorf("failed to expand subnet %s: %v", ip, err)
+			}
+			ipsToAdd = expandedIPs
+		} else {
+			// It's a single IP - validate it
 			if net.ParseIP(ip) == nil {
-				return errors.New("invalid IP in proxyIPList")
+				return fmt.Errorf("invalid IP address: %s", ip)
+			}
+			ipsToAdd = []string{ip}
+		}
+
+		// Add each IP to the interface
+		for _, singleIP := range ipsToAdd {
+			// Check if IP was already added
+			addedIPsMutex.Lock()
+			alreadyAdded := addedIPs[singleIP]
+			addedIPsMutex.Unlock()
+
+			if !alreadyAdded {
+				// Add IP to interface with /32 mask
+				if err := addIPToInterface(iface, singleIP); err != nil {
+					return err
+				}
+
+				// Mark IP as added
+				addedIPsMutex.Lock()
+				addedIPs[singleIP] = true
+				addedIPsMutex.Unlock()
+
+				log.Printf("Added IPv4 %s to interface %s", singleIP, iface)
 			}
 		}
 	}
+
 	return nil
+}
+
+// handleSubnetsWithProxyIP handles case when proxyIP is set
+// Adds subnets as routes to local loopback interface
+func handleSubnetsWithProxyIP(ipList string) error {
+	if ipList == "" {
+		return nil
+	}
+
+	ips := strings.Split(ipList, ",")
+	for _, ip := range ips {
+		ip = strings.TrimSpace(ip)
+
+		if strings.Contains(ip, "/") {
+			// It's a subnet - validate and add it as a route
+			if !config.ValidateSubnet(ip) {
+				return fmt.Errorf("invalid subnet: %s", ip)
+			}
+
+			// Check if subnet was already added
+			addedSubnetsMutex.Lock()
+			alreadyAdded := addedSubnets[ip]
+			addedSubnetsMutex.Unlock()
+
+			if !alreadyAdded {
+				// Add the subnet as a route
+				if err := config.ExecuteCommand(ip); err != nil {
+					return fmt.Errorf("failed to add subnet route: %w", err)
+				}
+
+				// Mark subnet as added
+				addedSubnetsMutex.Lock()
+				addedSubnets[ip] = true
+				addedSubnetsMutex.Unlock()
+
+				log.Printf("Added subnet route %s", ip)
+			}
+		} else {
+			// It's an IP address - validate it
+			if net.ParseIP(ip) == nil {
+				return fmt.Errorf("invalid IP in proxyIPList: %s", ip)
+			}
+		}
+	}
+
+	return nil
+}
+
+func validateIPList(ipList string, proxyIP string) error {
+	if ipList == "" {
+		return nil
+	}
+
+	// Case 1: proxyIP is blank - add IPs/subnets to interface
+	if proxyIP == "" {
+		return handleIPsWithoutProxyIP(ipList)
+	}
+
+	// Case 2: proxyIP is set - add subnets as routes
+	return handleSubnetsWithProxyIP(ipList)
 }
 
 func validatePortRange(port string) error {
@@ -149,7 +333,7 @@ func (db *DB) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 	if user.ProxyIPList != "" {
 
-		if err := validateIPList(user.ProxyIPList); err != nil {
+		if err := validateIPList(user.ProxyIPList, user.ProxyIP); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -431,12 +615,24 @@ func (db *DB) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	var fields []string
 	var args []interface{}
 
+	// Get current proxyIP value if not being updated
+	var currentProxyIP string
+	if user.ProxyIP == nil {
+		row := db.Connection.QueryRow("SELECT proxyIP FROM users WHERE user=?", username)
+		if err := row.Scan(&currentProxyIP); err != nil && err != sql.ErrNoRows {
+			http.Error(w, fmt.Sprintf("Failed to get current user data: %v", err), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		currentProxyIP = *user.ProxyIP
+	}
+
 	if user.Password != nil {
 		fields = append(fields, "password=?")
 		args = append(args, *user.Password)
 	}
 	if user.ProxyIPList != nil {
-		if err := validateIPList(*user.ProxyIPList); err != nil {
+		if err := validateIPList(*user.ProxyIPList, currentProxyIP); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -569,6 +765,76 @@ func withAuth(handler http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (db *DB) LoadAndProcessUsers() error {
+	query := `SELECT user, proxyIPList, proxyIP FROM users`
+	rows, err := db.Connection.Query(query)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve users: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var username, proxyIPList, proxyIP string
+		if err := rows.Scan(&username, &proxyIPList, &proxyIP); err != nil {
+			log.Printf("Error scanning user %s: %v", username, err)
+			continue
+		}
+
+		// Skip if proxyIPList is empty
+		if proxyIPList == "" {
+			continue
+		}
+
+		// Case 1: proxyIP is blank - add IPs/subnets to interface
+		if proxyIP == "" {
+			if err := handleIPsWithoutProxyIP(proxyIPList); err != nil {
+				log.Printf("Failed to process IPs for user %s (proxyIP blank): %v", username, err)
+				continue
+			}
+			log.Printf("Processed IPs for user %s to default interface", username)
+			continue
+		}
+
+		// Case 2: proxyIP is set - add subnets as routes
+		ips := strings.Split(proxyIPList, ",")
+		for _, ip := range ips {
+			ip = strings.TrimSpace(ip)
+			if strings.Contains(ip, "/") {
+				// Check if subnet was already added
+				addedSubnetsMutex.Lock()
+				alreadyAdded := addedSubnets[ip]
+				addedSubnetsMutex.Unlock()
+
+				if alreadyAdded {
+					log.Printf("Subnet %s already added (for user %s)", ip, username)
+					continue
+				}
+				// It's a subnet - validate and add it as a route
+				if !config.ValidateSubnet(ip) {
+					log.Printf("Invalid subnet for user %s: %s", username, ip)
+					continue
+				}
+				// Add the subnet as a route (similar to how it's done from config.json)
+				if err := config.ExecuteCommand(ip); err != nil {
+					log.Printf("Failed to add subnet route for user %s, subnet %s: %v", username, ip, err)
+					continue
+				}
+				// Mark subnet as added
+				addedSubnetsMutex.Lock()
+				addedSubnets[ip] = true
+				addedSubnetsMutex.Unlock()
+				log.Printf("Added subnet %s for user %s", ip, username)
+			}
+		}
+	}
+
+	if err = rows.Err(); err != nil {
+		return fmt.Errorf("error iterating users: %v", err)
+	}
+
+	return nil
+}
+
 func StartServer() {
 
 	db := &DB{}
@@ -585,6 +851,11 @@ func StartServer() {
 
 	if len(allowedIPs) == 0 {
 		log.Println("No allowed IPs configured, accepting all IPs.")
+	}
+
+	// Load users and process their subnets
+	if err := db.LoadAndProcessUsers(); err != nil {
+		log.Printf("Error loading and processing users: %v", err)
 	}
 
 	http.HandleFunc("/users", withAuth(db.GetAllUsers))

@@ -168,6 +168,10 @@ func PerformProxyAuthenticationValidation(requestObj *clientrequest.Request, dec
 	if authErr != nil {
 		requestObj.Conn.Write(proxyAuthenticationRequiredResponse)
 		fmt.Println("AUTH: invalid user", credentialsKey, requestObj.Host, requestObj.Conn.RemoteAddr().String())
+		// Track authentication failure for IP blocking
+		if userdb.IPBlocker != nil {
+			userdb.IPBlocker.TrackAuthFailure(requestObj.ClientIp.String())
+		}
 		return fmt.Errorf("not authrorized user")
 	}
 

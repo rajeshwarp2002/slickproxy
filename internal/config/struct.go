@@ -139,6 +139,11 @@ type Config struct {
 		Enabled  bool   `json:"enabled"`
 		Password string `json:"password"`
 	} `json:"stats"`
+	IPBlocking struct {
+		Enabled          bool `json:"enabled"`            // enable/disable IP blocking
+		FailureThreshold int  `json:"failure_threshold"`  // defaults to 100 if not set
+		BlockDurationMin int  `json:"block_duration_min"` // defaults to 5 if not set
+	} `json:"ip_blocking"`
 	Server  ServerConfig       `json:"server"`
 	Ports   []string           `json:"ports"`
 	Subnets []string           `json:"subnets"`

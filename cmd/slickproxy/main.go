@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"slickproxy/internal/config"
+	"slickproxy/internal/ipblocker"
 	"slickproxy/internal/metrics"
 	"slickproxy/internal/stats"
 	"slickproxy/internal/tcp"
@@ -89,6 +90,10 @@ func main() {
 	err = userdb.FetchAndUpdateUsers(true)
 	if err != nil {
 		log.Printf("Error reloading users: %v", err)
+		// Only abort startup if database connection is configured
+		if config.Cfg.DB.Connection != "" {
+			log.Fatalf("Aborting startup: database configured but connection failed")
+		}
 	} else {
 		log.Println("User data reloaded successfully")
 	}
@@ -113,5 +118,19 @@ func main() {
 	go userdb.WriteUsersToDB()
 	go userdb.MonitorCPUUsage()
 	go userdb.RefreshUsersData()
+
+	// Initialize IP blocker (can be nil if disabled in config)
+	userdb.IPBlocker = ipblocker.NewIPBlocker()
+	if userdb.IPBlocker != nil {
+		log.Println("IP blocker initialized and started")
+	} else {
+		log.Println("IP blocker is disabled")
+	}
+
+	// Start license check only if not in load balancer mode
+	if !config.Cfg.General.LB {
+		userdb.StartLicenseCheck()
+	}
+
 	select {}
 }

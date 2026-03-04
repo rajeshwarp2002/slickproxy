@@ -9,6 +9,7 @@ import (
 	"net"
 	"regexp"
 	"slickproxy/internal/config"
+	"slickproxy/internal/ipblocker"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,9 @@ var Ports []int
 var Users *map[string]*User
 var GlobalBlacklistDomains *map[string]struct{}
 var GlobalBlacklistPorts *map[string]struct{}
+
+// IP blocker instance (stateless, uses iptables with timeout-based cleanup)
+var IPBlocker *ipblocker.IPBlocker
 
 type IPToUserCredentials struct {
 	User     string
@@ -156,8 +160,21 @@ func FetchAndUpdateUsers(start bool) error {
 	defer db.Close()
 
 	// This is where connection errors are actually caught
-	if err := db.Ping(); err != nil {
-		return fmt.Errorf("failed to connect to database: %v", err)
+	// Retry for 10 seconds before giving up
+	deadline := time.Now().Add(10 * time.Second)
+	var lastErr error
+	for {
+		if err := db.Ping(); err == nil {
+			break
+		} else {
+			lastErr = err
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("failed to connect to database after 10s: %v", lastErr)
+		}
+
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	portRows, err := db.Query("SELECT port FROM listenports")
@@ -680,7 +697,7 @@ func MonitorCPUUsage() {
 			now := time.Now().UTC()
 
 			if now.After(cutoff) {
-				fmt.Println("Expired: current date is after ", cutoff)
+				//fmt.Println("Expired: current date is after ", cutoff)
 				//exit
 				//os.Exit(0)
 
@@ -884,11 +901,13 @@ func SyncProxyFileUsersToDatabase(proxyFileUsers []ProxyFileUser) error {
 
 		// Insert or update user
 		query := `
-			INSERT INTO users (user, password, proxyIPList, whiteListIP)
-			VALUES (?, ?, ?, ?)
+			INSERT INTO users (user, password, proxyIPList, whiteListIP, ipRotation)
+			VALUES (?, ?, ?, ?, 'file')
 			ON DUPLICATE KEY UPDATE
+			password = VALUES(password),
 			proxyIPList = VALUES(proxyIPList),
-			whiteListIP = VALUES(whiteListIP)
+			whiteListIP = VALUES(whiteListIP),
+			ipRotation = 'file'
 		`
 
 		_, err := db.Exec(query,
@@ -916,9 +935,9 @@ func SyncProxyFileUsersToDatabase(proxyFileUsers []ProxyFileUser) error {
 	// Update global IP auth map
 	IPAuthMap = &ipAuthMap
 
-	// Delete users that don't have proxy files
+	// Delete users that don't have proxy files (only file-based users)
 	usersInDB := make(map[string]bool)
-	rows, err := db.Query("SELECT user FROM users WHERE LENGTH(proxyIPList) > 0")
+	rows, err := db.Query("SELECT user FROM users WHERE LENGTH(proxyIPList) > 0 AND ipRotation = 'file'")
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -929,15 +948,15 @@ func SyncProxyFileUsersToDatabase(proxyFileUsers []ProxyFileUser) error {
 		}
 	}
 
-	// Delete users that are not in proxy files
+	// Delete file-based users that are not in proxy files
 	for username := range usersInDB {
 		if !processedUsernames[username] {
-			deleteQuery := "DELETE FROM users WHERE user = ?"
+			deleteQuery := "DELETE FROM users WHERE user = ? AND ipRotation = 'file'"
 			_, err := db.Exec(deleteQuery, username)
 			if err != nil {
 				log.Printf("Error deleting user %s: %v", username, err)
 			} else {
-				log.Printf("Deleted user %s (no proxy file)", username)
+				log.Printf("Deleted file-based user %s (no proxy file)", username)
 			}
 		}
 	}

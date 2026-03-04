@@ -89,7 +89,7 @@ func (pim *PortIPMapper) Start(adapter *SOCKS5ToHTTPAdapter) {
 		go func() {
 			endpointTicker := time.NewTicker(pim.EndpointRefreshInterval)
 			sidTicker := time.NewTicker(pim.SIDRefreshInterval)
-			loggingTicker := time.NewTicker(5 * time.Minute)
+			loggingTicker := time.NewTicker(1 * time.Minute)
 			defer endpointTicker.Stop()
 			defer sidTicker.Stop()
 			defer loggingTicker.Stop()
@@ -113,6 +113,7 @@ func (pim *PortIPMapper) Start(adapter *SOCKS5ToHTTPAdapter) {
 					}
 
 				case <-loggingTicker.C:
+					//pim.LogEndpointSIDArrayToFile()
 
 				case <-pim.stopChan:
 					fmt.Println("INFO PortIPMapper stopped")
@@ -144,6 +145,10 @@ func (pim *PortIPMapper) LoadEndpointConfig() error {
 	peerIPPortToEndpointMap := make(map[string]string)
 	for _, endpoint := range cfg.Endpoints {
 		if endpoint == nil || len(endpoint.Peers) == 0 {
+			continue
+		}
+		// Only load endpoint with name rc_all
+		if strings.ToLower(endpoint.Endpoint) != "rc_all" {
 			continue
 		}
 		for _, peer := range endpoint.Peers {
@@ -305,6 +310,7 @@ func (pim *PortIPMapper) RefreshAllPeerMappings() {
 	pim.EndpointToSIDArray = endpointToSIDArray
 	pim.mu.Unlock()
 
+	//pim.LogEndpointSIDArrayToFile()
 	fmt.Printf("INFO PortIPMapper: Refreshed %d SID->IP mappings from %d peers (NextSID=%d, AvailableSIDs=%d)\n",
 		len(newSIDToIPMap), len(peerEndpointsMap), nextSID, len(newAvailableSIDs))
 }
@@ -634,12 +640,16 @@ func (pim *PortIPMapper) GetNextDifEndpoint() (*IPMapEntry, error) {
 func (pim *PortIPMapper) GetBySID(sid int) (*IPMapEntry, error) {
 	pim.mu.RLock()
 	sidStr := strconv.Itoa(sid)
+	//fmt.Printf("DEBUG GetBySID called with SID=%d (converted to %s)\n", sid, sidStr)
 	entry, exists := pim.SIDToIPMap[sidStr]
 	pim.mu.RUnlock()
 
 	if !exists {
+		//fmt.Printf("DEBUG GetBySID: No entry found for SID %d (key %s)\n", sid, sidStr)
 		return nil, fmt.Errorf("no mapping found for SID %d", sid)
 	}
+	//fmt.Printf("DEBUG GetBySID found entry for SID %d: PeerIP=%s, ProxyIP=%s, Port=%d\n",
+	//	sid, entry.PeerIP, entry.ProxyIP, entry.Port)
 
 	return entry, nil
 }
@@ -676,7 +686,38 @@ func (pim *PortIPMapper) LogEndpointSIDArrayToFile() {
 		return
 	}
 
-	for endpoint, sidArray := range pim.EndpointToSIDArray {
+	// Log SIDToIPMap
+	sidToIPHeader := fmt.Sprintf("\n----- SIDToIPMap (%d entries) -----\n", len(pim.SIDToIPMap))
+	if _, err := f.WriteString(sidToIPHeader); err != nil {
+		fmt.Printf("WARN PortIPMapper: Failed to write SIDToIPMap header: %v\n", err)
+		return
+	}
+
+	// Sort SIDs for consistent output
+	var sortedSIDs []string
+	for sid := range pim.SIDToIPMap {
+		sortedSIDs = append(sortedSIDs, sid)
+	}
+	sort.Slice(sortedSIDs, func(i, j int) bool {
+		iVal, _ := strconv.Atoi(sortedSIDs[i])
+		jVal, _ := strconv.Atoi(sortedSIDs[j])
+		return iVal < jVal
+	})
+
+	for _, sid := range sortedSIDs {
+		entry := pim.SIDToIPMap[sid]
+		// Only print entries with PeerIP 194.126.172.66
+		if entry.PeerIP == "194.126.172.66" {
+			sidLine := fmt.Sprintf("SID=%s -> PeerIP=%s | ProxyIP=%s | Port=%d\n",
+				sid, entry.PeerIP, entry.ProxyIP, entry.Port)
+			if _, err := f.WriteString(sidLine); err != nil {
+				fmt.Printf("WARN PortIPMapper: Failed to write SID line: %v\n", err)
+				return
+			}
+		}
+	}
+
+	/*for endpoint, sidArray := range pim.EndpointToSIDArray {
 		sidArrayStr := make([]string, len(sidArray))
 		for i, sid := range sidArray {
 			sidArrayStr[i] = strconv.Itoa(sid)
@@ -699,7 +740,7 @@ func (pim *PortIPMapper) LogEndpointSIDArrayToFile() {
 				}
 			}
 		}
-	}
+	}*/
 
 	footer := fmt.Sprintf("===== END Snapshot =====\n\n")
 	if _, err := f.WriteString(footer); err != nil {
