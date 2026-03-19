@@ -650,7 +650,6 @@ func (pim *PortIPMapper) GetBySID(sid int) (*IPMapEntry, error) {
 	}
 	//fmt.Printf("DEBUG GetBySID found entry for SID %d: PeerIP=%s, ProxyIP=%s, Port=%d\n",
 	//	sid, entry.PeerIP, entry.ProxyIP, entry.Port)
-
 	return entry, nil
 }
 

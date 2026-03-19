@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	cryptorand "crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -349,6 +351,25 @@ func generateUUID() string {
 	return hex.EncodeToString(b)
 }
 
+// hashSessionToSID converts session to numeric SID
+// If session is already numeric, returns it as-is
+// If session is alphanumeric, hashes it to a number in 400K range
+func hashSessionToSID(session string) int {
+	if session == "" {
+		return 0
+	}
+	// Try to parse as integer first
+	if val, err := strconv.Atoi(session); err == nil {
+		return val
+	}
+	// Not numeric - hash the alphanumeric session string
+	h := sha256.Sum256([]byte(session))
+	// Convert first 4 bytes to uint32
+	val := binary.BigEndian.Uint32(h[:4])
+	// Mod to get value in 400K range (0-400,000)
+	return int(val % 400000)
+}
+
 // isIgnorableErr checks if an error should be ignored during data transfer
 // These errors are common and expected when connections are closed or reset
 func isIgnorableErr(err error) bool {
@@ -572,7 +593,14 @@ func (adapter *SOCKS5ToHTTPAdapter) HandleClient(rv *clientrequest.Request) erro
 			fmt.Println("--------------------------------------------------")
 			fmt.Println("[" + requestID + "] DEBUG Attempt " + strconv.Itoa(attempt) + " of " + strconv.Itoa(appConfig.PeerRetryAttempts))
 		}
-		proxyAddr, isRemoteProxy, err := adapter.resolveProxyAddress(rv.Credentials.Code, rv.Credentials.OriginalSession, attempt)
+		// Use OriginalSession if provided, else use Session (which is guaranteed to be int)
+		sidStr := ""
+		if rv.Credentials.OriginalSession != "" {
+			sidStr = strconv.Itoa(hashSessionToSID(rv.Credentials.OriginalSession))
+		} else if rv.Credentials.Session != "" {
+			sidStr = rv.Credentials.Session // Already guaranteed to be int
+		}
+		proxyAddr, isRemoteProxy, err := adapter.resolveProxyAddress(rv.Credentials.Code, sidStr, attempt)
 		if config.Cfg.General.Viprox_log {
 			fmt.Println("[" + requestID + "] DEBUG Resolved proxyAddr: " + proxyAddr + " isRemoteProxy=" + strconv.FormatBool(isRemoteProxy))
 		}
@@ -626,9 +654,9 @@ func (adapter *SOCKS5ToHTTPAdapter) HandleClient(rv *clientrequest.Request) erro
 			//fmt.Printf("["+requestID+"] INFO Using proxy %s for target %s (remote proxy: %v, auth map cache: %v) \n", proxyAddr, rv.Host, isRemoteProxy, adapter.AuthMapCache != nil)
 			uname, pass, ok := adapter.AuthMapCache.GetCredentials(strings.ToLower(rv.Credentials.Code))
 			if ok {
-				if rv.Credentials.Session != "" {
+				if sidStr != "" {
 					//str := strconv.Itoa(intSid)
-					uname = uname + "-" + rv.Credentials.OriginalSession
+					uname = uname + "-" + sidStr
 				}
 				//fmt.Printf("[%s] INFO Adding Proxy-Authorization header for user: %s", requestID, uname)
 				authHeader := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", uname, pass)))

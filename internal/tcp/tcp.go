@@ -56,11 +56,11 @@ func StartTcpServer(port uint16) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("Accept error: %v", err)
+			log.Printf("Accept error on port %d: %v", port, err)
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
 				continue
 			}
-			break
+			log.Fatalf("FATAL: Accept failed on port %d, : %v", port, err)
 		}
 		if userdb.CpuOverThreshold || userdb.FdThreshold {
 			log.Printf("CPU or FD over threshold, rejecting connection: CPU=%v, FD=%v", userdb.CpuOverThreshold, userdb.FdThreshold)

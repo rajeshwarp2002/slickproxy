@@ -26,6 +26,12 @@ net.core.somaxconn = 65535
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 10
 net.ipv4.ip_local_port_range = 1024 65535
+net.netfilter.nf_conntrack_max = 10000000
+net.netfilter.nf_conntrack_tcp_timeout_established = 300
+net.netfilter.nf_conntrack_udp_timeout = 30
+net.netfilter.nf_conntrack_udp_timeout_stream = 60
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
 EOF
 
 sudo sysctl --system

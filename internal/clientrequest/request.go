@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"slickproxy/internal/config"
@@ -83,7 +82,6 @@ func (r *Request) Close() error {
 }
 
 func (r *ProxyConn) Close() error {
-	syscall.Close(r.Fd)
 	r.Conn.Close()
 	return nil
 }

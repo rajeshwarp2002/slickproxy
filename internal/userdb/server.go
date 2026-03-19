@@ -90,7 +90,7 @@ func getDefaultInterface() (string, error) {
 
 func addIPToInterface(iface, ip string) error {
 	// Check if it's a single IP or a subnet
-	if !strings.Contains(ip, "/") {
+	/*if !strings.Contains(ip, "/") {
 		// Single IP - add with /32 mask
 		ip = ip + "/32"
 	}
@@ -102,7 +102,7 @@ func addIPToInterface(iface, ip string) error {
 			return nil
 		}
 		return fmt.Errorf("failed to add IP %s to interface %s: %v", ip, iface, err)
-	}
+	}*/
 	return nil
 }
 
@@ -439,20 +439,20 @@ func (db *DB) GetUser(w http.ResponseWriter, r *http.Request) {
 	var user struct {
 		User                     string
 		Password                 string
-		ProxyIPList              string
-		ProxyPort                string
+		ProxyIPList              sql.NullString
+		ProxyPort                sql.NullString
 		ActiveConnections        int
 		ConnectionsPerSecond     int
 		ThroughputPerSecond      int
-		TotalQuota               int
-		QuotaDuration            string
-		TimeQuota                int
-		IpMode                   string
-		IpRotation               string
-		PortToIP                 string
-		WhiteListIP              string
+		TotalQuota               sql.NullInt64
+		QuotaDuration            sql.NullString
+		TimeQuota                sql.NullInt64
+		IpMode                   sql.NullString
+		IpRotation               sql.NullString
+		PortToIP                 sql.NullString
+		WhiteListIP              sql.NullString
 		RotationIntervalSec      int
-		ProxyIP                  string
+		ProxyIP                  sql.NullString
 		BytesPerSecond           uint64
 		CurrentActiveConnections uint64
 		TotalUsedBytes           uint64
@@ -472,8 +472,8 @@ func (db *DB) GetUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if user.TimeQuota != 0 {
-		user.TimeQuotaReadable = time.Unix(int64(user.TimeQuota), 0).Format("2006-01-02 15:04:05")
+	if user.TimeQuota.Valid && user.TimeQuota.Int64 != 0 {
+		user.TimeQuotaReadable = time.Unix(user.TimeQuota.Int64, 0).Format("2006-01-02 15:04:05")
 	} else {
 		user.TimeQuotaReadable = "Not Set"
 	}
@@ -538,19 +538,19 @@ func (db *DB) GetAllUsers(w http.ResponseWriter, r *http.Request) {
 		var user struct {
 			User                     string
 			Password                 string
-			ProxyIP                  string
-			ProxyIPList              string
-			ProxyPort                string
+			ProxyIP                  sql.NullString
+			ProxyIPList              sql.NullString
+			ProxyPort                sql.NullString
 			ActiveConnections        int
 			ConnectionsPerSecond     int
 			ThroughputPerSecond      int
-			TotalQuota               int
-			QuotaDuration            string
-			TimeQuota                int
-			IpMode                   string
-			IpRotation               string
-			PortToIP                 string
-			WhiteListIP              string
+			TotalQuota               sql.NullInt64
+			QuotaDuration            sql.NullString
+			TimeQuota                sql.NullInt64
+			IpMode                   sql.NullString
+			IpRotation               sql.NullString
+			PortToIP                 sql.NullString
+			WhiteListIP              sql.NullString
 			RotationIntervalSec      int
 			BytesPerSecond           uint64
 			CurrentActiveConnections uint64
@@ -566,8 +566,8 @@ func (db *DB) GetAllUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if user.TimeQuota != 0 {
-			user.TimeQuotaReadable = time.Unix(int64(user.TimeQuota), 0).Format("2006-01-02 15:04:05")
+		if user.TimeQuota.Valid && user.TimeQuota.Int64 != 0 {
+			user.TimeQuotaReadable = time.Unix(user.TimeQuota.Int64, 0).Format("2006-01-02 15:04:05")
 		} else {
 			user.TimeQuotaReadable = "Not Set"
 		}
@@ -575,21 +575,21 @@ func (db *DB) GetAllUsers(w http.ResponseWriter, r *http.Request) {
 		users = append(users, map[string]interface{}{
 			"user":                     user.User,
 			"password":                 user.Password,
-			"proxyIPList":              user.ProxyIPList,
-			"proxyPort":                user.ProxyPort,
+			"proxyIPList":              user.ProxyIPList.String,
+			"proxyPort":                user.ProxyPort.String,
 			"activeConnections":        user.ActiveConnections,
 			"connectionsPerSecond":     user.ConnectionsPerSecond,
 			"throughputPerSecond":      user.ThroughputPerSecond,
-			"totalQuota":               user.TotalQuota,
-			"quotaDuration":            user.QuotaDuration,
-			"timeQuota":                user.TimeQuota,
+			"totalQuota":               user.TotalQuota.Int64,
+			"quotaDuration":            user.QuotaDuration.String,
+			"timeQuota":                user.TimeQuota.Int64,
 			"timeQuotaReadable":        user.TimeQuotaReadable,
-			"ipMode":                   user.IpMode,
-			"ipRotation":               user.IpRotation,
-			"portToIP":                 user.PortToIP,
-			"whiteListIP":              user.WhiteListIP,
+			"ipMode":                   user.IpMode.String,
+			"ipRotation":               user.IpRotation.String,
+			"portToIP":                 user.PortToIP.String,
+			"whiteListIP":              user.WhiteListIP.String,
 			"rotationIntervalSec":      user.RotationIntervalSec,
-			"proxyIP":                  user.ProxyIP,
+			"proxyIP":                  user.ProxyIP.String,
 			"bytesPerSecond":           user.BytesPerSecond,
 			"currentActiveConnections": user.CurrentActiveConnections,
 			"totalUsedBytes":           user.TotalUsedBytes,

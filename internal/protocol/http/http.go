@@ -84,6 +84,7 @@ func readProxyAuthHeader(requestObj *clientrequest.Request, parsedRequest *http.
 		}
 
 		requestObj.Conn.Write(proxyAuthenticationRequiredResponse)
+		fmt.Println("AUTH: no auth header and no whitelist IP match for", clientIP, requestObj.Host, requestObj.Conn.RemoteAddr().String())
 		return "", fmt.Errorf("no auth header and no whitelist IP match for %s", clientIP)
 	}
 	decodedCredentials := decodeBase64Auth(authHeader, true)
