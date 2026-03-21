@@ -27,11 +27,6 @@ net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 10
 net.ipv4.ip_local_port_range = 1024 65535
 net.netfilter.nf_conntrack_max = 10000000
-net.netfilter.nf_conntrack_tcp_timeout_established = 300
-net.netfilter.nf_conntrack_udp_timeout = 30
-net.netfilter.nf_conntrack_udp_timeout_stream = 60
-net.ipv4.conf.all.rp_filter = 0
-net.ipv4.conf.default.rp_filter = 0
 EOF
 
 sudo sysctl --system
@@ -49,6 +44,40 @@ sudo systemctl start influxdb
 echo "Setting up InfluxDB database..."
 influx -execute "CREATE DATABASE go_metrics;"
 influx -execute "CREATE RETENTION POLICY \"7days\" ON \"go_metrics\" DURATION 7d REPLICATION 1 DEFAULT;"
+
+
+#!/bin/bash
+echo "Adding iptables rules for ports 8086, 3086, 3000, and 11000..."
+
+PORTS=(8086 3306 3000 11000)
+
+# Add rules to iptables
+for PORT in "${PORTS[@]}"; do
+    sudo iptables -t mangle -I INPUT -p tcp --dport "$PORT" -j ACCEPT
+done
+
+# Persist the rules in /etc/rc.local
+echo "Adding iptables rules to /etc/rc.local for persistence..."
+if [ ! -f /etc/rc.local ]; then
+    sudo tee /etc/rc.local > /dev/null <<'EOF'
+#!/bin/bash
+iptables -t mangle -I INPUT -p tcp --dport 8086 -j ACCEPT
+iptables -t mangle -I INPUT -p tcp --dport 3306 -j ACCEPT
+iptables -t mangle -I INPUT -p tcp --dport 3000 -j ACCEPT
+iptables -t mangle -I INPUT -p tcp --dport 11000 -j ACCEPT
+exit 0
+EOF
+    sudo chmod +x /etc/rc.local
+else
+    for PORT in "${PORTS[@]}"; do
+        RULE="iptables -t mangle -I INPUT 12 -p tcp --dport $PORT -j ACCEPT"
+        if ! grep -q "$RULE" /etc/rc.local; then
+            sudo sed -i "/^exit 0/i $RULE" /etc/rc.local
+        fi
+    done
+fi
+
+echo "Done. Ports ${PORTS[*]} added and persisted."
 
 # -----------------------------
 # Install Grafana
@@ -82,6 +111,7 @@ echo "Setting up SlickProxy service..."
 mkdir -p ~/slickproxy
 
 # Copy binaries (assuming they are in current folder)
+#systemctl stop slickproxy
 cp slickproxy.bin ~/slickproxy/slickproxy
 cp config.json ~/slickproxy/
 chmod 777 ~/slickproxy/slickproxy
@@ -111,49 +141,10 @@ sudo systemctl enable slickproxy.service
 # -----------------------------
 # Initialize MySQL database and tables
 # -----------------------------
-echo "Creating SlickProxy database and tables..."
-MYSQL_ROOT_PASS="your_password"  # <-- replace this
-mysql -uroot -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASS}'; FLUSH PRIVILEGES;"
-mysql -uroot -p${MYSQL_ROOT_PASS} <<EOF
-CREATE DATABASE IF NOT EXISTS slickproxy;
 
-USE slickproxy;
-
-CREATE TABLE IF NOT EXISTS users(
-  user VARCHAR(100) NOT NULL,
-  password VARCHAR(35) NOT NULL DEFAULT '',
-  proxyIP VARCHAR(45) NOT NULL DEFAULT '',
-  proxyIPList LONGTEXT,
-  proxyPort LONGTEXT,
-  activeConnections INT NOT NULL DEFAULT 0,
-  connectionsPerSecond INT NOT NULL DEFAULT 0,
-  throughputPerSecond INT NOT NULL DEFAULT 0,
-  totalQuota INT NOT NULL DEFAULT 0,
-  quotaDuration VARCHAR(10) NOT NULL DEFAULT '',
-  timeQuota INT NOT NULL DEFAULT 0,
-  ipMode VARCHAR(20) NOT NULL DEFAULT '',
-  ipRotation VARCHAR(20) NOT NULL DEFAULT '',
-  portToIP LONGTEXT,
-  whiteListIP LONGTEXT,
-  rotationIntervalSec INT NOT NULL DEFAULT 0,
-  bytesPerSecond BIGINT UNSIGNED DEFAULT 0,
-  currentActiveConnections BIGINT UNSIGNED DEFAULT 0,
-  totalUsedBytes BIGINT UNSIGNED DEFAULT 0,
-  PRIMARY KEY (user)
-);
-
-CREATE TABLE IF NOT EXISTS blacklist(
-  value VARCHAR(255) NOT NULL,
-  type VARCHAR(255) NOT NULL,
-  PRIMARY KEY(value, type)
-);
-
-CREATE TABLE IF NOT EXISTS listenports(
-  port INT NOT NULL UNIQUE
-);
-
-INSERT INTO listenports (port) VALUES (4567);
-EOF
+# -----------------------------
+# iptables rule for port 11000
+# -----------------------------
 
 # -----------------------------
 # Start SlickProxy
