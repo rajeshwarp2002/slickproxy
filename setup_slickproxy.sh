@@ -46,7 +46,6 @@ influx -execute "CREATE DATABASE go_metrics;"
 influx -execute "CREATE RETENTION POLICY \"7days\" ON \"go_metrics\" DURATION 7d REPLICATION 1 DEFAULT;"
 
 
-#!/bin/bash
 echo "Adding iptables rules for ports 8086, 3086, 3000, and 11000..."
 
 PORTS=(8086 3306 3000 11000)
@@ -141,7 +140,49 @@ sudo systemctl enable slickproxy.service
 # -----------------------------
 # Initialize MySQL database and tables
 # -----------------------------
+echo "Creating SlickProxy database and tables..."
+MYSQL_ROOT_PASS="your_password"  # <-- replace this
+mysql -uroot -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASS}'; FLUSH PRIVILEGES;"
+mysql -uroot -p${MYSQL_ROOT_PASS} <<EOF
+CREATE DATABASE IF NOT EXISTS slickproxy;
 
+USE slickproxy;
+
+CREATE TABLE IF NOT EXISTS users(
+  user VARCHAR(100) NOT NULL,
+  password VARCHAR(35) NOT NULL DEFAULT '',
+  proxyIP VARCHAR(45) NOT NULL DEFAULT '',
+  proxyIPList LONGTEXT,
+  proxyPort LONGTEXT,
+  activeConnections INT NOT NULL DEFAULT 0,
+  connectionsPerSecond INT NOT NULL DEFAULT 0,
+  throughputPerSecond INT NOT NULL DEFAULT 0,
+  totalQuota INT NOT NULL DEFAULT 0,
+  quotaDuration VARCHAR(10) NOT NULL DEFAULT '',
+  timeQuota INT NOT NULL DEFAULT 0,
+  ipMode VARCHAR(20) NOT NULL DEFAULT '',
+  ipRotation VARCHAR(20) NOT NULL DEFAULT '',
+  portToIP LONGTEXT,
+  whiteListIP LONGTEXT,
+  rotationIntervalSec INT NOT NULL DEFAULT 0,
+  bytesPerSecond BIGINT UNSIGNED DEFAULT 0,
+  currentActiveConnections BIGINT UNSIGNED DEFAULT 0,
+  totalUsedBytes BIGINT UNSIGNED DEFAULT 0,
+  PRIMARY KEY (user)
+);
+
+CREATE TABLE IF NOT EXISTS blacklist(
+  value VARCHAR(255) NOT NULL,
+  type VARCHAR(255) NOT NULL,
+  PRIMARY KEY(value, type)
+);
+
+CREATE TABLE IF NOT EXISTS listenports(
+  port INT NOT NULL UNIQUE
+);
+
+INSERT INTO listenports (port) VALUES (4567);
+EOF
 # -----------------------------
 # iptables rule for port 11000
 # -----------------------------
