@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 
 	"os"
@@ -115,27 +114,23 @@ func main() {
 	for _, port := range config.Cfg.Ports {
 		port, _ := strconv.Atoi(port)
 		go tcp.StartTcpServer(uint16(port))
-
-		// open a UDP server only in direct proxy mode (not in LB mode)
-		if !config.Cfg.General.LB {
-			ip := "0.0.0.0"
-			addr := net.UDPAddr{
-				Port: port,
-				IP:   net.ParseIP(ip),
-			}
-
-			c, err := net.ListenUDP("udp", &addr)
-			if err != nil {
-				log.Fatalf("Listen udp failed")
-			}
-			go udp.HandleUDP(c, &udp.ConnMap)
-		}
-
 	}
 	config.NewCachedTime(time.Millisecond * 10)
 	go userdb.WriteUsersToDB()
 	go userdb.MonitorCPUUsage()
 	go userdb.RefreshUsersData()
+
+	// Start UDP listeners if not in ephemeral port mode (ConnMap mode)
+	if !config.Cfg.General.UDPEphemeralPort {
+		for _, port := range config.Cfg.Ports {
+			port, _ := strconv.Atoi(port)
+			go func(p uint16) {
+				if err := udp.HandleUDP(p); err != nil {
+					log.Printf("Failed to start UDP listener on port %d: %v", p, err)
+				}
+			}(uint16(port))
+		}
+	}
 
 	// Initialize IP blocker (can be nil if disabled in config)
 	userdb.IPBlocker = ipblocker.NewIPBlocker()

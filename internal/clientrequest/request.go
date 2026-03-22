@@ -34,6 +34,9 @@ type Request struct {
 	Attempts      int
 	Error         string
 	Udp           bool
+	UdpClientIP   string // Client-declared IP from SOCKS5 ASSOCIATE (may be 0.0.0.0)
+	UdpClientPort int    // Client-declared port from SOCKS5 ASSOCIATE (may be 0)
+	ProxyIP       net.IP // Selected proxy IP for outbound connections
 }
 
 type ProxyConn struct {

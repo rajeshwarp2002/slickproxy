@@ -110,7 +110,7 @@ var (
 
 const socksCommandConnect = 0x01
 
-func extractTargetAddress(reader *bufio.Reader, conn net.Conn, lb bool) (string, bool, error) {
+func extractTargetAddress(reader *bufio.Reader, conn net.Conn, lb bool) (string, bool, string, int, error) {
 	const (
 		versionIdx     = 0
 		commandIdx     = 1
@@ -131,11 +131,11 @@ func extractTargetAddress(reader *bufio.Reader, conn net.Conn, lb bool) (string,
 	buf := make([]byte, 263)
 	n, err := io.ReadAtLeast(reader, buf, domainLenIdx+1)
 	if err != nil {
-		return "", false, err
+		return "", false, "", 0, err
 	}
 
 	if buf[versionIdx] != socksProtocolVersion {
-		return "", false, errInvalidSOCKSVersion
+		return "", false, "", 0, errInvalidSOCKSVersion
 	}
 
 	udpAssoc := false
@@ -143,15 +143,15 @@ func extractTargetAddress(reader *bufio.Reader, conn net.Conn, lb bool) (string,
 	switch buf[commandIdx] {
 	case CommandConnect:
 	case CommandBind:
-		return "", false, errCmd
+		return "", false, "", 0, errCmd
 	case CommandAssociate:
 		udpAssoc = true
 	default:
-		return "", false, errCmd
+		return "", false, "", 0, errCmd
 	}
 
 	if lb && buf[commandIdx] != socksCommandConnect {
-		return "", false, errCommandNotSupported
+		return "", false, "", 0, errCommandNotSupported
 	}
 
 	var requiredLength int
@@ -163,29 +163,40 @@ func extractTargetAddress(reader *bufio.Reader, conn net.Conn, lb bool) (string,
 	case addressTypeDomain:
 		requiredLength = int(buf[domainLenIdx]) + domainBaseLen
 	default:
-		return "", false, errAddressTypeNotSupported
+		return "", false, "", 0, errAddressTypeNotSupported
 	}
 
 	if n < requiredLength {
 		if _, err := io.ReadFull(reader, buf[n:requiredLength]); err != nil {
-			return "", false, err
+			return "", false, "", 0, err
 		}
 	} else if n > requiredLength {
-		return "", false, errExtraDataInRequest
+		return "", false, "", 0, errExtraDataInRequest
 	}
 
 	var targetHost string
+	var clientIP string
+	var clientPort int
+
 	switch buf[addressTypeIdx] {
 	case addressTypeIPv4:
 		targetHost = net.IP(buf[ipv4AddressIdx : ipv4AddressIdx+net.IPv4len]).String()
+		// For ASSOCIATE, this is the client-declared IP
+		if udpAssoc {
+			clientIP = targetHost
+		}
 	case addressTypeIPv6:
 		targetHost = net.IP(buf[ipv4AddressIdx : ipv4AddressIdx+net.IPv6len]).String()
+		if udpAssoc {
+			clientIP = targetHost
+		}
 	case addressTypeDomain:
 		targetHost = string(buf[domainStartIdx : domainStartIdx+buf[domainLenIdx]])
 	}
 
 	port := binary.BigEndian.Uint16(buf[requiredLength-2:])
-	return net.JoinHostPort(targetHost, strconv.Itoa(int(port))), udpAssoc, nil
+	clientPort = int(port)
+	return net.JoinHostPort(targetHost, strconv.Itoa(int(port))), udpAssoc, clientIP, clientPort, nil
 }
 
 var (
@@ -271,12 +282,14 @@ func HandleSOCKS5Connection(reader *bufio.Reader, conn net.Conn, dataStore userd
 		return requestObj, fmt.Errorf("socks5 handshake failed")
 	}
 
-	destinationAddr, udpAssoc, err := extractTargetAddress(reader, requestObj.Conn, config.Cfg.General.LB)
+	destinationAddr, udpAssoc, clientIP, clientPort, err := extractTargetAddress(reader, requestObj.Conn, config.Cfg.General.LB)
 	if err != nil {
 		return requestObj, fmt.Errorf("socks5 destination parse error")
 	}
 	requestObj.Host = destinationAddr
 	requestObj.Udp = udpAssoc
+	requestObj.UdpClientIP = clientIP
+	requestObj.UdpClientPort = clientPort
 	if err = userdb.IsDomainBlacklisted(destinationAddr, dataStore.GlobalBlacklistDomains); err != nil {
 		log.Println("Domain is blacklisted:", err)
 		return requestObj, err

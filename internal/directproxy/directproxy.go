@@ -174,6 +174,9 @@ func createDirectConnection(rv clientrequest.Request) error {
 		dialHost = host
 	}
 
+	// Set the selected proxy IP for UDP target binding
+	rv.ProxyIP = ip
+
 	if rv.Udp {
 		return udp.HandleUDPStart(&rv)
 	}

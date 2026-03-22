@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"slickproxy/internal/clientrequest"
+	"slickproxy/internal/config"
 	"slickproxy/internal/utils"
 	"strconv"
 	"sync"
@@ -23,17 +24,29 @@ const (
 	AddressIPv6 = uint8(4)
 )
 
-const maxUDPPacketSize = 2 * 1024
+const maxUDPPacketSize = 65535 // Max UDP datagram size
 
-var ConnMap sync.Map // Global sync.Map to hold source IPs of active connections
+// ClientAddr stores the client's IP and port for validation
+type ClientAddr struct {
+	IP       string // Client's IP address
+	Port     int    // Client's source port
+	Declared bool   // True if client declared address, false if using 0.0.0.0:0 fallback
+	ProxyIP  net.IP // Selected proxy IP for outbound connections
+}
+
+var ConnMap sync.Map // Global sync.Map to hold ClientAddr for active connections (used when UDPEphemeralPort is disabled)
+
+// connMapKey creates a key for the ConnMap using srcIP and srcPort
+// If port is 0, it represents an undeclared client (fallback case)
+func connMapKey(srcIP string, srcPort int) string {
+	return fmt.Sprintf("%s:%d", srcIP, srcPort)
+}
 
 var errUnrecognizedAddrType = fmt.Errorf("unrecognized address type")
 
-var udpClientSrcAddr = &net.UDPAddr{IP: net.IPv4zero, Port: 0}
-
 var udpPacketBufferPool = sync.Pool{
 	New: func() interface{} {
-		return make([]byte, maxUDPPacketSize, maxUDPPacketSize)
+		return make([]byte, maxUDPPacketSize)
 	},
 }
 
@@ -46,64 +59,189 @@ type AddrSpec struct {
 }
 
 func HandleUDPStart(rv *clientrequest.Request) error {
-	// Defer the connection close and clean up the map entry based on the source IP
-	defer func() {
-		// Extract the source IP from the connection's remote address
-		remoteAddr := rv.Conn.RemoteAddr().(*net.TCPAddr)
-		srcIP := remoteAddr.IP.String()
+	// Extract the server-side IP from the TCP connection (where client connected to)
+	tcpAddr, ok := rv.Conn.LocalAddr().(*net.TCPAddr)
+	if !ok {
+		return fmt.Errorf("failed to get TCP local address")
+	}
+	localIP := tcpAddr.IP
 
-		// Log the closing of the connection
-		log.Printf("Closing connection from %s", srcIP)
+	// Choose implementation based on config
+	if config.Cfg.General.UDPEphemeralPort {
+		return handleUDPStartEphemeral(rv, localIP)
+	} else {
+		return handleUDPStartConnMap(rv, localIP)
+	}
+}
 
-		// Erase the entry for this source IP from the sync.Map
-		ConnMap.Delete(srcIP)
+// handleUDPStartEphemeral creates a dedicated UDP listener on an ephemeral port for each session
+func handleUDPStartEphemeral(rv *clientrequest.Request, localIP net.IP) error {
+	// Get client address for validation
+	// Prefer client-declared address from SOCKS5 ASSOCIATE, fall back to TCP source
+	clientIP := rv.UdpClientIP
+	clientPort := rv.UdpClientPort
 
-		// Close the connection
-		if err := rv.Conn.Close(); err != nil {
-			log.Printf("Error closing connection: %v", err)
+	// If client didn't declare (0.0.0.0:0), use TCP connection source
+	declaredAddr := true
+	if clientIP == "" || clientIP == "0.0.0.0" || clientIP == "::" || clientPort == 0 {
+		declaredAddr = false
+		remoteAddrStr := rv.Conn.RemoteAddr().String()
+		var err error
+		clientIP, _, err = net.SplitHostPort(remoteAddrStr)
+		if err != nil {
+			return fmt.Errorf("failed to parse client address %s: %w", remoteAddrStr, err)
 		}
-	}()
-	// Extract source IP and store it in the map (before reading)
-	remoteAddr := rv.Conn.RemoteAddr().(*net.TCPAddr)
-	srcIP := remoteAddr.IP.String()
-	log.Printf("Adding connection from %s", srcIP)
-	ConnMap.Store(srcIP, rv.Conn)
+		clientPortStr := ""
+		_, clientPortStr, err = net.SplitHostPort(remoteAddrStr)
+		if err != nil {
+			return fmt.Errorf("failed to parse client address %s: %w", remoteAddrStr, err)
+		}
+		var portErr error
+		clientPort, portErr = strconv.Atoi(clientPortStr)
+		if portErr != nil {
+			return fmt.Errorf("failed to parse client port %s: %w", clientPortStr, portErr)
+		}
+		log.Printf("Client didn't declare UDP address, using TCP source %s:%d (IP validation only)", clientIP, clientPort)
+	} else {
+		log.Printf("Using client-declared UDP address from SOCKS5 ASSOCIATE: %s:%d (strict IP:port validation)", clientIP, clientPort)
+	}
 
+	// Create a dedicated UDP listener for this session on an ephemeral port
+	listenAddr := &net.UDPAddr{
+		IP:   localIP, // Bind to the selected proxy IP
+		Port: 0,       // OS assigns ephemeral port
+	}
+	udpListener, err := net.ListenUDP("udp", listenAddr)
+	if err != nil {
+		log.Printf("Failed to create UDP listener: %v", err)
+		return fmt.Errorf("failed to create UDP listener: %w", err)
+	}
+	defer udpListener.Close()
+
+	// Get the actual port assigned by OS
+	localAddr := udpListener.LocalAddr().(*net.UDPAddr)
+	assignedPort := localAddr.Port
+	log.Printf("Created UDP listener for client %s:%d on port %d", clientIP, clientPort, assignedPort)
+
+	// Send SOCKS5 UDP ASSOCIATE response with the listener port
 	tcpAddr := rv.Conn.LocalAddr().(*net.TCPAddr)
 	utils.SetIPZone(tcpAddr)
 
-	rep := utils.CreateSocks5Response(tcpAddr)
+	// Create response with the ephemeral UDP port
+	responseAddr := &net.TCPAddr{
+		IP:   tcpAddr.IP,
+		Port: assignedPort, // Return the UDP listener port
+	}
+	rep := utils.CreateSocks5Response(responseAddr)
 	if _, err := rv.Conn.Write(rep); err != nil {
-		return err
+		return fmt.Errorf("failed to send UDP ASSOCIATE response: %w", err)
 	}
 
-	// wait here till the client close the connection
-	// check every 10 secs
-	tmp := make([]byte, 1024) // Buffer to hold incoming data
-	var neverTimeout time.Time
+	// Create client address context for validation
+	clientAddr := &ClientAddr{
+		IP:       clientIP,
+		Port:     clientPort,
+		Declared: declaredAddr,
+	}
+
+	// Start goroutine to monitor TCP connection closure
+	tcpClosedChan := make(chan struct{})
+	go monitorTCPClosure(rv.Conn, tcpClosedChan)
+
+	// Listen for UDP packets on the dedicated listener
+	return listenAndForwardUDPEphemeral(udpListener, tcpClosedChan, clientAddr, rv)
+}
+
+// monitorTCPClosure watches the TCP control connection for closure
+func monitorTCPClosure(conn net.Conn, closedChan chan struct{}) {
+	buf := make([]byte, 1)
 	for {
-		rv.Conn.SetReadDeadline(neverTimeout)
-		log.Println("wait")
-		if _, err := rv.Conn.Read(tmp); err == io.EOF {
-			log.Println("wait over")
-			break
-		} else if err != nil {
-			// If the error is a timeout, simply ignore it
+		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		_, err := conn.Read(buf)
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("TCP connection closed: %v", err)
+			} else {
+				log.Printf("TCP connection closed gracefully")
+			}
+			close(closedChan)
+			return
+		}
+	}
+}
+
+// listenAndForwardUDPEphemeral listens for UDP packets and forwards them (ephemeral mode)
+func listenAndForwardUDPEphemeral(udpListener *net.UDPConn, tcpClosedChan chan struct{}, clientAddr *ClientAddr, rv *clientrequest.Request) error {
+	for {
+		buffer := getUDPPacketBuffer() // Get from pool
+
+		// Set deadline to periodically check if TCP is closed
+		udpListener.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, remoteAddr, err := udpListener.ReadFromUDP(buffer)
+
+		// Check if TCP was closed
+		select {
+		case <-tcpClosedChan:
+			log.Printf("TCP connection closed, stopping UDP relay")
+			putUDPPacketBuffer(buffer) // Return to pool
+			return nil
+		default:
+		}
+
+		if err != nil {
+			putUDPPacketBuffer(buffer) // Return to pool on error
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				rv.Conn.SetReadDeadline(neverTimeout)
-				// Ignore timeout errors, just continue to the next read attempt
-				time.Sleep(10 * time.Second)
+				// Timeout is expected, continue listening
 				continue
 			}
-			log.Printf("Error while reading data: %v", err)
-			break // Break the loop on any other error
-		} else {
-			log.Println("wait oho")
-			rv.Conn.SetReadDeadline(neverTimeout)
+			if err == io.EOF {
+				break
+			}
+			log.Printf("UDP listener error: %v", err)
+			return err
 		}
-		time.Sleep(10 * time.Second)
-	}
 
+		// Validate source IP and port match registered client
+		srcIP := remoteAddr.IP.String()
+		srcPort := remoteAddr.Port
+
+		// If address was declared, validate both IP and port
+		// If not declared (0.0.0.0:0), only validate IP
+		if clientAddr.Declared {
+			if srcIP != clientAddr.IP || srcPort != clientAddr.Port {
+				log.Printf("UDP packet from unexpected source %s:%d (expected declared %s:%d), dropping", srcIP, srcPort, clientAddr.IP, clientAddr.Port)
+				putUDPPacketBuffer(buffer)
+				continue
+			}
+		} else {
+			if srcIP != clientAddr.IP {
+				log.Printf("UDP packet from unexpected source IP %s (expected %s), dropping (port varies: got %d)", srcIP, clientAddr.IP, srcPort)
+				putUDPPacketBuffer(buffer)
+				continue
+			}
+		}
+
+		// Process the UDP packet - copy from buffer to another pool buffer
+		pktBuffer := getUDPPacketBuffer()
+		copy(pktBuffer, buffer[:n])
+		pktBuffer = pktBuffer[:n]
+		putUDPPacketBuffer(buffer) // Return read buffer to pool
+
+		go func(packet []byte, src *net.UDPAddr, request *clientrequest.Request) {
+			defer putUDPPacketBuffer(packet)
+
+			// Create a reply function that sends back through this UDP listener
+			replyFunc := func(data []byte) error {
+				_, err := udpListener.WriteToUDP(data, src)
+				return err
+			}
+
+			err := serveUDPConn(packet, replyFunc, request.ProxyIP)
+			if err != nil {
+				log.Printf("Error handling UDP packet from %s: %v", src.String(), err)
+			}
+		}(pktBuffer, remoteAddr, rv)
+	}
 	return nil
 }
 
@@ -132,43 +270,6 @@ func putUDPPacketBuffer(p []byte) {
 	udpPacketBufferPool.Put(p)
 }
 
-//FIXME: insecure implementation of UDP server, anyone could send package here without authentication
-
-func HandleUDP(udpConn *net.UDPConn, connMap *sync.Map) {
-	for {
-		buffer := make([]byte, 1024) // buffer to hold incoming UDP packet
-		n, src, err := udpConn.ReadFromUDP(buffer)
-		if err != nil {
-			log.Printf("udp socks: Failed to accept udp traffic: %v", err)
-			continue
-		}
-
-		// Get source IP from the remote address
-		srcIP := src.IP.String()
-
-		// Check if the source IP is in the sync.Map
-		_, loaded := connMap.Load(srcIP)
-		if !loaded {
-			log.Printf("Source IP %s not found in connMap. Exiting...", srcIP)
-			continue // Skip the packet if source IP is not in the map
-		}
-
-		buffer = buffer[:n]
-		go func() {
-			// Handle the UDP connection (e.g., serve the data)
-			// Just echo back the data for this example
-			err := serveUDPConn(buffer, func(data []byte) error {
-				_, err := udpConn.WriteToUDP(data, src)
-				return err
-			})
-
-			if err != nil {
-				log.Printf("Error handling UDP connection: %v", err)
-			}
-		}()
-	}
-}
-
 /*********************************************************
     UDP PACKAGE to proxy
     +----+------+------+----------+----------+----------+
@@ -181,15 +282,15 @@ func HandleUDP(udpConn *net.UDPConn, connMap *sync.Map) {
 // ErrUDPFragmentNoSupported UDP fragments not supported error
 var ErrUDPFragmentNoSupported = errors.New("")
 
-func serveUDPConn(udpPacket []byte, reply func([]byte) error) error {
+func serveUDPConn(udpPacket []byte, reply func([]byte) error, proxyIP net.IP) error {
 	// RSV  Reserved X'0000'
 	// FRAG Current fragment number, donnot support fragment here
-	header := []byte{0, 0, 0}
-	if len(udpPacket) <= 3 {
+	if len(udpPacket) < 3 {
 		err := fmt.Errorf("short UDP package header, %d bytes only", len(udpPacket))
 		log.Printf("udp socks: Failed to get UDP package header: %v", err)
 		return err
 	}
+	header := udpPacket[0:3]
 	if header[0] != 0x00 || header[1] != 0x00 {
 		err := fmt.Errorf("unsupported socks UDP package header, %+v", header[:2])
 		log.Printf("udp socks: Failed to parse UDP package header: %v", err)
@@ -238,13 +339,32 @@ func serveUDPConn(udpPacket []byte, reply func([]byte) error) error {
 	targetAddrRawSize += 2
 	targetAddrRaw = targetAddrRaw[:targetAddrRawSize]
 
-	// resolve addr.
+	// resolve addr - prefer IPv6 if proxyIP is IPv6, else IPv4
 	if targetAddrSpec.FQDN != "" {
-		addr, err := net.ResolveIPAddr("ip", targetAddrSpec.FQDN)
+		var addrNetwork string
+		if proxyIP.To4() == nil {
+			// proxyIP is IPv6, prefer IPv6 resolution
+			addrNetwork = "ip6"
+		} else {
+			// proxyIP is IPv4, prefer IPv4 resolution
+			addrNetwork = "ip4"
+		}
+
+		addr, err := net.ResolveIPAddr(addrNetwork, targetAddrSpec.FQDN)
 		if err != nil {
-			err := fmt.Errorf("failed to resolve destination '%v': %v", targetAddrSpec.FQDN, err)
-			log.Printf("udp socks: %+v", err)
-			return err
+			// If preferred network fails, try the other
+			var fallbackNetwork string
+			if addrNetwork == "ip6" {
+				fallbackNetwork = "ip4"
+			} else {
+				fallbackNetwork = "ip6"
+			}
+			addr, err = net.ResolveIPAddr(fallbackNetwork, targetAddrSpec.FQDN)
+			if err != nil {
+				err := fmt.Errorf("failed to resolve destination '%v': %v", targetAddrSpec.FQDN, err)
+				log.Printf("udp socks: %+v", err)
+				return err
+			}
 		}
 		targetAddrSpec.IP = addr.IP
 	}
@@ -255,35 +375,245 @@ func serveUDPConn(udpPacket []byte, reply func([]byte) error) error {
 		err := fmt.Errorf("failed to resolve destination UDP Addr '%v': %v", targetAddrSpec.Address(), err)
 		return err
 	}
-	target, err := net.DialUDP("udp", udpClientSrcAddr, targetUDPAddr)
+
+	// Bind to the selected proxy IP for outbound connection
+	// Determine network type based on proxy IP (localAddr), not target
+	var network string
+	if proxyIP.To4() == nil {
+		network = "udp6" // proxyIP is IPv6, use udp6
+	} else {
+		network = "udp4" // proxyIP is IPv4, use udp4
+	}
+
+	localAddr := &net.UDPAddr{IP: proxyIP, Port: 0}
+	target, err := net.DialUDP(network, localAddr, targetUDPAddr)
 	if err != nil {
 		err = fmt.Errorf("connect to %v failed: %v", targetUDPAddr, err)
 		log.Printf("udp socks: %+v", err)
 		return err
 	}
-	defer target.Close()
 
-	// write data to target and read the response back
+	// write data to target
 	if _, err := target.Write(udpPacket[len(header)+len(targetAddrRaw):]); err != nil {
 		log.Printf("udp socks: fail to write udp data to dest %s: %+v",
 			targetUDPAddr.String(), err)
+		target.Close()
 		return err
 	}
-	respBuffer := getUDPPacketBuffer()
-	defer putUDPPacketBuffer(respBuffer)
-	copy(respBuffer[0:len(header)], header)
-	copy(respBuffer[len(header):len(header)+len(targetAddrRaw)], targetAddrRaw)
-	n, err := target.Read(respBuffer[len(header)+len(targetAddrRaw):])
-	if err != nil {
-		log.Printf("udp socks: fail to read udp resp from dest %s: %+v",
-			targetUDPAddr.String(), err)
-		return err
-	}
-	respBuffer = respBuffer[:len(header)+len(targetAddrRaw)+n]
 
-	if reply(respBuffer); err != nil {
-		log.Printf("udp socks: fail to send udp resp back: %+v", err)
-		return err
-	}
+	// Start listener goroutine for server responses (bidirectional relay)
+	// This keeps the connection open and relays any unsolicited packets from server
+	go func() {
+		defer target.Close()
+
+		// Gaming keepalive timeout: 60 seconds (typical for game servers)
+		keepaliveTimeout := 60 * time.Second
+		respBuffer := getUDPPacketBuffer()
+		defer putUDPPacketBuffer(respBuffer)
+
+		// Copy header and address to response buffer template
+		copy(respBuffer[0:len(header)], header)
+		copy(respBuffer[len(header):len(header)+len(targetAddrRaw)], targetAddrRaw)
+		headerSize := len(header) + len(targetAddrRaw)
+
+		for {
+			// Set read deadline with keepalive timeout
+			target.SetReadDeadline(time.Now().Add(keepaliveTimeout))
+
+			n, err := target.Read(respBuffer[headerSize:])
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					log.Printf("UDP keepalive timeout for %s (no response in %v), closing", targetUDPAddr.String(), keepaliveTimeout)
+				} else {
+					log.Printf("UDP read error from %s: %v", targetUDPAddr.String(), err)
+				}
+				return
+			}
+
+			// Relay response back to client
+			if err := reply(respBuffer[:headerSize+n]); err != nil {
+				log.Printf("udp socks: fail to relay response back: %+v", err)
+				return
+			}
+		}
+	}()
+
+	// Return immediately - listener goroutine handles all responses
 	return nil
+}
+
+// handleUDPStartConnMap uses source IP and port validation with a global UDP listener (legacy mode)
+func handleUDPStartConnMap(rv *clientrequest.Request, localIP net.IP) error {
+	// Get client address for validation
+	// Prefer client-declared address from SOCKS5 ASSOCIATE, fall back to TCP source
+	srcIP := rv.UdpClientIP
+	srcPort := rv.UdpClientPort
+	declaredAddr := true
+
+	// If client didn't declare (0.0.0.0:0), use TCP connection source
+	if srcIP == "" || srcIP == "0.0.0.0" || srcIP == "::" || srcPort == 0 {
+		declaredAddr = false
+		remoteAddrStr := rv.Conn.RemoteAddr().String()
+		var err error
+		srcIP, srcPortStr, err := net.SplitHostPort(remoteAddrStr)
+		if err != nil {
+			return fmt.Errorf("failed to parse client address %s: %w", remoteAddrStr, err)
+		}
+		var portErr error
+		srcPort, portErr = strconv.Atoi(srcPortStr)
+		if portErr != nil {
+			return fmt.Errorf("failed to parse client port %s: %w", srcPortStr, portErr)
+		}
+		log.Printf("Client didn't declare UDP address, using TCP source %s:%d (IP validation only)", srcIP, srcPort)
+	} else {
+		log.Printf("Using client-declared UDP address from SOCKS5 ASSOCIATE: %s:%d (strict IP:port validation)", srcIP, srcPort)
+	}
+
+	// Create client address for validation
+	clientAddr := &ClientAddr{
+		IP:       srcIP,
+		Port:     srcPort,
+		Declared: declaredAddr,
+		ProxyIP:  rv.ProxyIP,
+	}
+
+	// Create key based on whether address was declared
+	// If declared: key is "srcIP:srcPort" (exact match required)
+	// If not declared: key is "srcIP:0" (fallback match allowed)
+	var keyPort int
+	if declaredAddr {
+		keyPort = srcPort
+	} else {
+		keyPort = 0
+	}
+	key := connMapKey(srcIP, keyPort)
+
+	// Defer cleanup
+	defer func() {
+		log.Printf("Closing UDP connection for %s (Declared=%v)", key, declaredAddr)
+		ConnMap.Delete(key)
+	}()
+
+	log.Printf("Adding UDP connection for client %s:%d with key %s (Declared=%v)", srcIP, srcPort, key, declaredAddr)
+	ConnMap.Store(key, clientAddr)
+
+	// Send SOCKS5 UDP ASSOCIATE response with the same port as TCP
+	tcpAddr := rv.Conn.LocalAddr().(*net.TCPAddr)
+	utils.SetIPZone(tcpAddr)
+
+	rep := utils.CreateSocks5Response(tcpAddr)
+	if _, err := rv.Conn.Write(rep); err != nil {
+		return fmt.Errorf("failed to send UDP ASSOCIATE response: %w", err)
+	}
+
+	// Monitor TCP connection for closure
+	buf := make([]byte, 1)
+	for {
+		rv.Conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		_, err := rv.Conn.Read(buf)
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("TCP connection closed for %s: %v", srcIP, err)
+			} else {
+				log.Printf("TCP connection closed gracefully for %s", srcIP)
+			}
+			return nil
+		}
+	}
+}
+
+// HandleUDP starts a global UDP listener for the ConnMap mode (source IP validation)
+// This is called from main.go when UDPEphemeralPort is disabled
+func HandleUDP(port uint16) error {
+	listenAddr := &net.UDPAddr{IP: net.IPv4zero, Port: int(port)}
+	udpConn, err := net.ListenUDP("udp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("failed to listen on UDP port %d: %w", port, err)
+	}
+
+	log.Printf("UDP listener started on port %d (ConnMap mode)", port)
+
+	// Run the listener in this goroutine - HandleUDPGlobalListener blocks
+	HandleUDPGlobalListener(udpConn)
+	return nil
+}
+
+// HandleUDPGlobalListener handles UDP packets from a global listener (used with ConnMap mode)
+func HandleUDPGlobalListener(udpConn *net.UDPConn) {
+	for {
+		buffer := getUDPPacketBuffer() // Get from pool
+		n, src, err := udpConn.ReadFromUDP(buffer)
+		if err != nil {
+			log.Printf("UDP listener error: %v", err)
+			putUDPPacketBuffer(buffer)
+			continue
+		}
+
+		// Get source IP and port from the remote address
+		srcIP := src.IP.String()
+		srcPort := src.Port
+
+		// Try to find exact match first: srcIP:srcPort
+		exactKey := connMapKey(srcIP, srcPort)
+		clientAddrInterface, loaded := ConnMap.Load(exactKey)
+
+		// If exact match not found and srcPort != 0, try fallback: srcIP:0 (undeclared session)
+		if !loaded && srcPort != 0 {
+			fallbackKey := connMapKey(srcIP, 0)
+			clientAddrInterface, loaded = ConnMap.Load(fallbackKey)
+			if loaded {
+				log.Printf("Found session via fallback key %s for packet from %s", fallbackKey, exactKey)
+			}
+		}
+
+		if !loaded {
+			log.Printf("No matching session found for %s (tried exact match and fallback)", exactKey)
+			putUDPPacketBuffer(buffer)
+			continue
+		}
+
+		clientAddr, ok := clientAddrInterface.(*ClientAddr)
+		if !ok {
+			log.Printf("Invalid ClientAddr type in ConnMap for key %s, dropping packet", exactKey)
+			putUDPPacketBuffer(buffer)
+			continue
+		}
+
+		// Validate based on whether address was declared
+		if clientAddr.Declared {
+			// Strict: client declared exact IP:port, must match
+			if srcPort != clientAddr.Port {
+				log.Printf("UDP packet from %s:%d but session declared port %d (strict validation), dropping", srcIP, srcPort, clientAddr.Port)
+				putUDPPacketBuffer(buffer)
+				continue
+			}
+		} else {
+			// Loose: client didn't declare (used 0.0.0.0:0), only IP must match
+			// Log if port differs from stored port
+			if srcPort != clientAddr.Port {
+				log.Printf("UDP packet from %s:%d for undeclared session (expected IP %s, port varies from stored %d)", srcIP, srcPort, clientAddr.IP, clientAddr.Port)
+			}
+		}
+
+		// Process the UDP packet - copy from buffer to another pool buffer
+		pktBuffer := getUDPPacketBuffer()
+		copy(pktBuffer, buffer[:n])
+		pktBuffer = pktBuffer[:n]
+		putUDPPacketBuffer(buffer) // Return read buffer to pool
+
+		go func(packet []byte, src *net.UDPAddr) {
+			defer putUDPPacketBuffer(packet)
+
+			// Create a reply function that sends back through the global UDP listener
+			replyFunc := func(data []byte) error {
+				_, err := udpConn.WriteToUDP(data, src)
+				return err
+			}
+
+			err := serveUDPConn(packet, replyFunc, clientAddr.ProxyIP)
+			if err != nil {
+				log.Printf("Error handling UDP packet from %s: %v", src.String(), err)
+			}
+		}(pktBuffer, src)
+	}
 }

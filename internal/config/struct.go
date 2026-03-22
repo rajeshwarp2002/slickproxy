@@ -128,6 +128,8 @@ type Config struct {
 		ProxyFilesPath       string `json:"proxy_files_path"`
 		ProxyFilesRegex      string `json:"proxy_files_regex"`
 		RefreshUsersInterval int    `json:"refresh_users_interval"`
+		UDPEphemeralPort     bool   `json:"udp_ephemeral_port"` // Use ephemeral ports for UDP relay (default: false, use ConnMap)
+		UDPBidirectional     bool   `json:"udp_bidirectional"`  // Enable bidirectional relay with peer discovery (for gaming/P2P, default: false)
 	} `json:"general"`
 	DB struct {
 		Connection  string `json:"connection"`
