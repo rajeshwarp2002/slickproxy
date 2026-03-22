@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 
 	"os"
@@ -12,6 +13,7 @@ import (
 	"slickproxy/internal/metrics"
 	"slickproxy/internal/stats"
 	"slickproxy/internal/tcp"
+	"slickproxy/internal/udp"
 	userdb "slickproxy/internal/userdb"
 	"strconv"
 	"syscall"
@@ -113,6 +115,22 @@ func main() {
 	for _, port := range config.Cfg.Ports {
 		port, _ := strconv.Atoi(port)
 		go tcp.StartTcpServer(uint16(port))
+
+		// open a UDP server only in direct proxy mode (not in LB mode)
+		if !config.Cfg.General.LB {
+			ip := "0.0.0.0"
+			addr := net.UDPAddr{
+				Port: port,
+				IP:   net.ParseIP(ip),
+			}
+
+			c, err := net.ListenUDP("udp", &addr)
+			if err != nil {
+				log.Fatalf("Listen udp failed")
+			}
+			go udp.HandleUDP(c, &udp.ConnMap)
+		}
+
 	}
 	config.NewCachedTime(time.Millisecond * 10)
 	go userdb.WriteUsersToDB()

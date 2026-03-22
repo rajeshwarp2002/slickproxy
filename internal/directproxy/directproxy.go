@@ -8,6 +8,7 @@ import (
 	"slickproxy/internal/bandwidthtracker"
 	"slickproxy/internal/clientrequest"
 	"slickproxy/internal/dns"
+	"slickproxy/internal/udp"
 	"slickproxy/internal/userdb"
 	"slickproxy/internal/utils"
 	"strconv"
@@ -171,6 +172,10 @@ func createDirectConnection(rv clientrequest.Request) error {
 		dialHost = host
 	} else {
 		dialHost = host
+	}
+
+	if rv.Udp {
+		return udp.HandleUDPStart(&rv)
 	}
 
 	dialConn, err, fd := establishTCPConnection(ip, 0, dialHost, rv.EndPort)

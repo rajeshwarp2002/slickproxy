@@ -20,6 +20,21 @@ import (
 	"slickproxy/internal/protocol/http"
 )
 
+// CMD declaration
+const (
+	// CommandConnect CMD CONNECT X'01'
+	CommandConnect = uint8(1)
+	// CommandBind CMD BIND X'02'. The BIND request is used in protocols
+	// which require the client to accept connections from the server.
+	CommandBind = uint8(2)
+	// CommandAssociate CMD UDP ASSOCIATE X'03'.  The UDP ASSOCIATE request
+	// is used to establish an association within the UDP relay process to
+	// handle UDP datagrams.
+	CommandAssociate = uint8(3)
+)
+
+var errCmd = errors.New("SOCKS supports CONNECT command")
+
 func isIPInUserWhitelist(ipAddress net.IP, user *userdb.User) bool {
 	ipAddressStr := ipAddress.String()
 	if len(user.WhiteListIP) == 0 {
@@ -95,7 +110,7 @@ var (
 
 const socksCommandConnect = 0x01
 
-func extractTargetAddress(reader *bufio.Reader, conn net.Conn) (string, error) {
+func extractTargetAddress(reader *bufio.Reader, conn net.Conn, lb bool) (string, bool, error) {
 	const (
 		versionIdx     = 0
 		commandIdx     = 1
@@ -116,14 +131,27 @@ func extractTargetAddress(reader *bufio.Reader, conn net.Conn) (string, error) {
 	buf := make([]byte, 263)
 	n, err := io.ReadAtLeast(reader, buf, domainLenIdx+1)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	if buf[versionIdx] != socksProtocolVersion {
-		return "", errInvalidSOCKSVersion
+		return "", false, errInvalidSOCKSVersion
 	}
-	if buf[commandIdx] != socksCommandConnect {
-		return "", errCommandNotSupported
+
+	udpAssoc := false
+	// Switch on the command
+	switch buf[commandIdx] {
+	case CommandConnect:
+	case CommandBind:
+		return "", false, errCmd
+	case CommandAssociate:
+		udpAssoc = true
+	default:
+		return "", false, errCmd
+	}
+
+	if lb && buf[commandIdx] != socksCommandConnect {
+		return "", false, errCommandNotSupported
 	}
 
 	var requiredLength int
@@ -135,15 +163,15 @@ func extractTargetAddress(reader *bufio.Reader, conn net.Conn) (string, error) {
 	case addressTypeDomain:
 		requiredLength = int(buf[domainLenIdx]) + domainBaseLen
 	default:
-		return "", errAddressTypeNotSupported
+		return "", false, errAddressTypeNotSupported
 	}
 
 	if n < requiredLength {
 		if _, err := io.ReadFull(reader, buf[n:requiredLength]); err != nil {
-			return "", err
+			return "", false, err
 		}
 	} else if n > requiredLength {
-		return "", errExtraDataInRequest
+		return "", false, errExtraDataInRequest
 	}
 
 	var targetHost string
@@ -157,7 +185,7 @@ func extractTargetAddress(reader *bufio.Reader, conn net.Conn) (string, error) {
 	}
 
 	port := binary.BigEndian.Uint16(buf[requiredLength-2:])
-	return net.JoinHostPort(targetHost, strconv.Itoa(int(port))), nil
+	return net.JoinHostPort(targetHost, strconv.Itoa(int(port))), udpAssoc, nil
 }
 
 var (
@@ -243,12 +271,12 @@ func HandleSOCKS5Connection(reader *bufio.Reader, conn net.Conn, dataStore userd
 		return requestObj, fmt.Errorf("socks5 handshake failed")
 	}
 
-	destinationAddr, err := extractTargetAddress(reader, requestObj.Conn)
+	destinationAddr, udpAssoc, err := extractTargetAddress(reader, requestObj.Conn, config.Cfg.General.LB)
 	if err != nil {
 		return requestObj, fmt.Errorf("socks5 destination parse error")
 	}
 	requestObj.Host = destinationAddr
-
+	requestObj.Udp = udpAssoc
 	if err = userdb.IsDomainBlacklisted(destinationAddr, dataStore.GlobalBlacklistDomains); err != nil {
 		log.Println("Domain is blacklisted:", err)
 		return requestObj, err

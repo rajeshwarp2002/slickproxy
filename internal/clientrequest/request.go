@@ -33,6 +33,7 @@ type Request struct {
 	UpstreamProxy config.ProxyConfigEntry
 	Attempts      int
 	Error         string
+	Udp           bool
 }
 
 type ProxyConn struct {

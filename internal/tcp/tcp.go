@@ -13,10 +13,13 @@ import (
 	"slickproxy/internal/stats"
 	"slickproxy/internal/userdb"
 	"strconv"
+	"sync"
 	"syscall"
 
 	"golang.org/x/sys/unix"
 )
+
+var ConnMap sync.Map // Global sync.Map to hold source IPs of active connections
 
 func SetSocketOptions(fd uintptr) error {
 	if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
