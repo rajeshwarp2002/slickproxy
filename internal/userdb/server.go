@@ -799,20 +799,25 @@ func (db *DB) LoadAndProcessUsers() error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var username, proxyIPList, proxyIP string
+		var username string
+		var proxyIPList, proxyIP sql.NullString
 		if err := rows.Scan(&username, &proxyIPList, &proxyIP); err != nil {
 			log.Printf("Error scanning user %s: %v", username, err)
 			continue
 		}
 
+		// Convert NULL to empty string
+		proxyIPListStr := proxyIPList.String
+		proxyIPStr := proxyIP.String
+
 		// Skip if proxyIPList is empty
-		if proxyIPList == "" {
+		if proxyIPListStr == "" {
 			continue
 		}
 
 		// Case 1: proxyIP is blank - add IPs/subnets to interface
-		if proxyIP == "" {
-			if err := handleIPsWithoutProxyIP(proxyIPList); err != nil {
+		if proxyIPStr == "" {
+			if err := handleIPsWithoutProxyIP(proxyIPListStr); err != nil {
 				log.Printf("Failed to process IPs for user %s (proxyIP blank): %v", username, err)
 				continue
 			}
@@ -821,7 +826,7 @@ func (db *DB) LoadAndProcessUsers() error {
 		}
 
 		// Case 2: proxyIP is set - add subnets as routes
-		ips := strings.Split(proxyIPList, ",")
+		ips := strings.Split(proxyIPListStr, ",")
 		for _, ip := range ips {
 			ip = strings.TrimSpace(ip)
 			if strings.Contains(ip, "/") {

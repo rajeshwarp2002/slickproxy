@@ -28,10 +28,12 @@ const maxUDPPacketSize = 65535 // Max UDP datagram size
 
 // ClientAddr stores the client's IP and port for validation
 type ClientAddr struct {
-	IP       string // Client's IP address
-	Port     int    // Client's source port
-	Declared bool   // True if client declared address, false if using 0.0.0.0:0 fallback
-	ProxyIP  net.IP // Selected proxy IP for outbound connections
+	IP          string     // Client's IP address
+	Port        int        // Client's source port
+	Declared    bool       // True if client declared address, false if using 0.0.0.0:0 fallback
+	ProxyIP     net.IP     // Selected proxy IP for outbound connections
+	TargetCache sync.Map   // Cache of target connections: key="IP:port", value=*net.UDPConn
+	mu          sync.Mutex // Protects concurrent access to TargetCache cleanup
 }
 
 var ConnMap sync.Map // Global sync.Map to hold ClientAddr for active connections (used when UDPEphemeralPort is disabled)
@@ -144,34 +146,57 @@ func handleUDPStartEphemeral(rv *clientrequest.Request, localIP net.IP) error {
 		Declared: declaredAddr,
 	}
 
-	// Start goroutine to monitor TCP connection closure
-	tcpClosedChan := make(chan struct{})
-	go monitorTCPClosure(rv.Conn, tcpClosedChan)
-
 	// Listen for UDP packets on the dedicated listener
-	return listenAndForwardUDPEphemeral(udpListener, tcpClosedChan, clientAddr, rv)
-}
-
-// monitorTCPClosure watches the TCP control connection for closure
-func monitorTCPClosure(conn net.Conn, closedChan chan struct{}) {
-	buf := make([]byte, 1)
-	for {
-		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-		_, err := conn.Read(buf)
-		if err != nil {
-			if err != io.EOF {
-				log.Printf("TCP connection closed: %v", err)
-			} else {
-				log.Printf("TCP connection closed gracefully")
-			}
-			close(closedChan)
-			return
-		}
-	}
+	return listenAndForwardUDPEphemeral(udpListener, clientAddr, rv)
 }
 
 // listenAndForwardUDPEphemeral listens for UDP packets and forwards them (ephemeral mode)
-func listenAndForwardUDPEphemeral(udpListener *net.UDPConn, tcpClosedChan chan struct{}, clientAddr *ClientAddr, rv *clientrequest.Request) error {
+func listenAndForwardUDPEphemeral(udpListener *net.UDPConn, clientAddr *ClientAddr, rv *clientrequest.Request) error {
+	// Create TCP closure monitoring channel
+	tcpClosedChan := make(chan struct{})
+	monitorStopChan := make(chan struct{})
+
+	// Local cache for target connections (per-session) - thread-safe sync.Map
+	targetConnCache := &sync.Map{}
+
+	// Start monitor goroutine (will be cleaned up by defer)
+	go func() {
+		defer close(tcpClosedChan)
+		buf := make([]byte, 1)
+		for {
+			select {
+			case <-monitorStopChan:
+				return
+			default:
+			}
+			rv.Conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+			_, err := rv.Conn.Read(buf)
+			if err != nil {
+				if err != io.EOF {
+					log.Printf("TCP connection closed: %v", err)
+				} else {
+					log.Printf("TCP connection closed gracefully")
+				}
+				return
+			}
+		}
+	}()
+
+	defer func() {
+		// Signal monitor to stop
+		close(monitorStopChan)
+		rv.Conn.SetReadDeadline(time.Now()) // makes Read return immediately with timeout error
+		// Wait for tcpClosedChan to be closed by monitor
+		<-tcpClosedChan
+		// Cleanup: close all cached target connections
+		targetConnCache.Range(func(key, value interface{}) bool {
+			if conn, ok := value.(*net.UDPConn); ok {
+				conn.Close()
+			}
+			return true
+		})
+	}()
+
 	for {
 		buffer := getUDPPacketBuffer() // Get from pool
 
@@ -227,7 +252,7 @@ func listenAndForwardUDPEphemeral(udpListener *net.UDPConn, tcpClosedChan chan s
 		pktBuffer = pktBuffer[:n]
 		putUDPPacketBuffer(buffer) // Return read buffer to pool
 
-		go func(packet []byte, src *net.UDPAddr, request *clientrequest.Request) {
+		go func(packet []byte, src *net.UDPAddr, request *clientrequest.Request, cache *sync.Map) {
 			defer putUDPPacketBuffer(packet)
 
 			// Create a reply function that sends back through this UDP listener
@@ -236,11 +261,11 @@ func listenAndForwardUDPEphemeral(udpListener *net.UDPConn, tcpClosedChan chan s
 				return err
 			}
 
-			err := serveUDPConn(packet, replyFunc, request.ProxyIP)
+			err := serveUDPConn(packet, replyFunc, request.ProxyIP, src, cache)
 			if err != nil {
 				log.Printf("Error handling UDP packet from %s: %v", src.String(), err)
 			}
-		}(pktBuffer, remoteAddr, rv)
+		}(pktBuffer, remoteAddr, rv, targetConnCache)
 	}
 	return nil
 }
@@ -282,7 +307,7 @@ func putUDPPacketBuffer(p []byte) {
 // ErrUDPFragmentNoSupported UDP fragments not supported error
 var ErrUDPFragmentNoSupported = errors.New("")
 
-func serveUDPConn(udpPacket []byte, reply func([]byte) error, proxyIP net.IP) error {
+func serveUDPConn(udpPacket []byte, reply func([]byte) error, proxyIP net.IP, src *net.UDPAddr, connCache *sync.Map) error {
 	// RSV  Reserved X'0000'
 	// FRAG Current fragment number, donnot support fragment here
 	if len(udpPacket) < 3 {
@@ -385,58 +410,144 @@ func serveUDPConn(udpPacket []byte, reply func([]byte) error, proxyIP net.IP) er
 		network = "udp4" // proxyIP is IPv4, use udp4
 	}
 
-	localAddr := &net.UDPAddr{IP: proxyIP, Port: 0}
-	target, err := net.DialUDP(network, localAddr, targetUDPAddr)
-	if err != nil {
-		err = fmt.Errorf("connect to %v failed: %v", targetUDPAddr, err)
-		log.Printf("udp socks: %+v", err)
-		return err
+	// Check if we already have a cached connection to this target
+	var target *net.UDPConn
+	var isNewConn bool
+	// Cache key includes source port so different clients get isolated connections
+	cacheKey := fmt.Sprintf("%d-%s", src.Port, targetUDPAddr.String())
+
+	if connCache != nil {
+		// Try to reuse cached connection
+		if cached, exists := connCache.Load(cacheKey); exists {
+			target = cached.(*net.UDPConn)
+			isNewConn = false
+			log.Printf("Reusing cached connection to %s", cacheKey)
+		}
+	}
+
+	// If no cached connection, create a new one
+	if target == nil {
+		isNewConn = true
+		localAddr := &net.UDPAddr{IP: proxyIP, Port: 0}
+		var err error
+		target, err = net.DialUDP(network, localAddr, targetUDPAddr)
+		if err != nil {
+			err = fmt.Errorf("connect to %v failed: %v", targetUDPAddr, err)
+			log.Printf("udp socks: %+v", err)
+			return err
+		}
+		// Cache the new connection atomically using LoadOrStore to prevent race
+		// If connection reuse is enabled, try to cache it
+		useConnectionReuse := config.Cfg.General.UDPConnectionReuse
+		if connCache != nil && useConnectionReuse {
+			// LoadOrStore: if key exists, use it; if not, store ours and return ours
+			actual, loaded := connCache.LoadOrStore(cacheKey, target)
+			if loaded {
+				// Another goroutine already stored a connection, use that instead
+				log.Printf("Connection for %s was already created, using that", cacheKey)
+				target.Close() // close our newly created connection
+				target = actual.(*net.UDPConn)
+				isNewConn = false // don't spawn listener, it's already running
+			}
+		}
 	}
 
 	// write data to target
 	if _, err := target.Write(udpPacket[len(header)+len(targetAddrRaw):]); err != nil {
 		log.Printf("udp socks: fail to write udp data to dest %s: %+v",
 			targetUDPAddr.String(), err)
-		target.Close()
+		// Only close if it's a new connection that just failed
+		if isNewConn {
+			target.Close()
+		}
 		return err
 	}
 
-	// Start listener goroutine for server responses (bidirectional relay)
-	// This keeps the connection open and relays any unsolicited packets from server
-	go func() {
-		defer target.Close()
+	// Check if connection reuse is enabled (default: true for backward compat)
+	useConnectionReuse := config.Cfg.General.UDPConnectionReuse
 
-		// Gaming keepalive timeout: 60 seconds (typical for game servers)
-		keepaliveTimeout := 60 * time.Second
+	// Reset read deadline - client just sent, so we have configured timeout to get a response
+	// This keeps the connection alive as long as the client keeps sending
+	// Default to 60s if not configured
+	timeoutSecs := config.Cfg.General.UDPTimeout
+	if timeoutSecs <= 0 {
+		timeoutSecs = 60
+	}
+	keepaliveTimeout := time.Duration(timeoutSecs) * time.Second
+	target.SetReadDeadline(time.Now().Add(keepaliveTimeout))
+
+	// If connection reuse is disabled, just do request-response and return
+	if !useConnectionReuse {
 		respBuffer := getUDPPacketBuffer()
 		defer putUDPPacketBuffer(respBuffer)
-
-		// Copy header and address to response buffer template
 		copy(respBuffer[0:len(header)], header)
 		copy(respBuffer[len(header):len(header)+len(targetAddrRaw)], targetAddrRaw)
 		headerSize := len(header) + len(targetAddrRaw)
 
-		for {
-			// Set read deadline with keepalive timeout
-			target.SetReadDeadline(time.Now().Add(keepaliveTimeout))
+		n, err := target.Read(respBuffer[headerSize:])
+		defer target.Close()
 
-			n, err := target.Read(respBuffer[headerSize:])
-			if err != nil {
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					log.Printf("UDP keepalive timeout for %s (no response in %v), closing", targetUDPAddr.String(), keepaliveTimeout)
-				} else {
-					log.Printf("UDP read error from %s: %v", targetUDPAddr.String(), err)
-				}
-				return
-			}
-
-			// Relay response back to client
-			if err := reply(respBuffer[:headerSize+n]); err != nil {
-				log.Printf("udp socks: fail to relay response back: %+v", err)
-				return
-			}
+		if err != nil {
+			log.Printf("udp socks: fail to read response from dest %s: %v", targetUDPAddr.String(), err)
+			return err
 		}
-	}()
+
+		if err := reply(respBuffer[:headerSize+n]); err != nil {
+			log.Printf("udp socks: fail to send response back: %v", err)
+			return err
+		}
+		return nil
+	}
+
+	// Connection reuse enabled - spawn listener goroutine
+	// This keeps the connection open and relays any unsolicited packets from server
+	// Only spawn listener if this is a new connection
+	if isNewConn {
+		go func() {
+			defer func() {
+				// Remove from cache when connection closes
+				if connCache != nil {
+					connCache.Delete(cacheKey)
+				}
+				target.Close()
+			}()
+
+			respBuffer := getUDPPacketBuffer()
+			defer putUDPPacketBuffer(respBuffer)
+
+			// Copy header and address to response buffer template
+			copy(respBuffer[0:len(header)], header)
+			copy(respBuffer[len(header):len(header)+len(targetAddrRaw)], targetAddrRaw)
+			headerSize := len(header) + len(targetAddrRaw)
+
+			for {
+				// Timeout gets reset every time client sends via target.SetReadDeadline() in serveUDPConn
+				// Configured via config.General.UDPTimeout (default: 60s)
+				n, err := target.Read(respBuffer[headerSize:])
+				if err != nil {
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						log.Printf("UDP connection to %s idle (no client or server activity), closing", targetUDPAddr.String())
+					} else {
+						log.Printf("UDP read error from %s: %v", targetUDPAddr.String(), err)
+					}
+					return
+				}
+
+				// Reset deadline on server response - server is active, keep connection alive
+				timeoutSecs := config.Cfg.General.UDPTimeout
+				if timeoutSecs <= 0 {
+					timeoutSecs = 60
+				}
+				target.SetReadDeadline(time.Now().Add(time.Duration(timeoutSecs) * time.Second))
+
+				// Relay response back to client
+				if err := reply(respBuffer[:headerSize+n]); err != nil {
+					log.Printf("udp socks: fail to relay response back: %+v", err)
+					return
+				}
+			}
+		}()
+	}
 
 	// Return immediately - listener goroutine handles all responses
 	return nil
@@ -455,7 +566,8 @@ func handleUDPStartConnMap(rv *clientrequest.Request, localIP net.IP) error {
 		declaredAddr = false
 		remoteAddrStr := rv.Conn.RemoteAddr().String()
 		var err error
-		srcIP, srcPortStr, err := net.SplitHostPort(remoteAddrStr)
+		var srcPortStr string
+		srcIP, srcPortStr, err = net.SplitHostPort(remoteAddrStr)
 		if err != nil {
 			return fmt.Errorf("failed to parse client address %s: %w", remoteAddrStr, err)
 		}
@@ -601,7 +713,7 @@ func HandleUDPGlobalListener(udpConn *net.UDPConn) {
 		pktBuffer = pktBuffer[:n]
 		putUDPPacketBuffer(buffer) // Return read buffer to pool
 
-		go func(packet []byte, src *net.UDPAddr) {
+		go func(packet []byte, src *net.UDPAddr, cache *ClientAddr) {
 			defer putUDPPacketBuffer(packet)
 
 			// Create a reply function that sends back through the global UDP listener
@@ -610,10 +722,10 @@ func HandleUDPGlobalListener(udpConn *net.UDPConn) {
 				return err
 			}
 
-			err := serveUDPConn(packet, replyFunc, clientAddr.ProxyIP)
+			err := serveUDPConn(packet, replyFunc, cache.ProxyIP, src, &cache.TargetCache)
 			if err != nil {
 				log.Printf("Error handling UDP packet from %s: %v", src.String(), err)
 			}
-		}(pktBuffer, src)
+		}(pktBuffer, src, clientAddr)
 	}
 }
