@@ -63,7 +63,11 @@ MODIFY ipMode VARCHAR(20) NOT NULL DEFAULT '',
 MODIFY ipRotation VARCHAR(20) NOT NULL DEFAULT '',
 MODIFY rotationIntervalSec INT NOT NULL DEFAULT 0;
 
-
+-- Create the file_regexes table for proxy file filtering patterns
+CREATE TABLE file_regexes (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    pattern VARCHAR(255) NOT NULL UNIQUE
+);
 
 -- Insert some sample ports
 INSERT INTO listenports (port) VALUES (4567);

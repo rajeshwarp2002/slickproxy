@@ -895,6 +895,8 @@ func StartServer() {
 	http.HandleFunc("/update", withAuth(db.UpdateUser))
 	http.HandleFunc("/delete", withAuth(db.DeleteUser))
 	http.HandleFunc("/metrics", withAuth(db.GetMetrics))
+	http.HandleFunc("/fileregex", withAuth(db.HandleFileRegex))
+	http.HandleFunc("/fileregexes", withAuth(db.HandleFileRegexes))
 
 	listener, err := createListener(8080)
 	if err != nil {
@@ -950,12 +952,24 @@ func createListener(port uint16) (net.Listener, error) {
 		return err
 	}
 
-	listener, err := lc.Listen(context.Background(), "tcp", ":"+strconv.Itoa(int(port)))
-	if err != nil {
-		return nil, err
-	}
+	// Retry for 10 seconds in case port is in TIME_WAIT state
+	retryDeadline := time.Now().Add(10 * time.Second)
+	var listener net.Listener
+	var err error
+	for {
+		listener, err = lc.Listen(context.Background(), "tcp", ":"+strconv.Itoa(int(port)))
+		if err == nil {
+			return listener, nil
+		}
 
-	return listener, nil
+		// Check if we've exceeded the retry deadline
+		if time.Now().After(retryDeadline) {
+			return nil, fmt.Errorf("failed to bind to port %d after 10 seconds: %v", port, err)
+		}
+
+		// Wait before retrying
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func loadConfig(allowedIPs *[]string) error {

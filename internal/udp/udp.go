@@ -621,7 +621,7 @@ func handleUDPStartConnMap(rv *clientrequest.Request, localIP net.IP) error {
 	// Monitor TCP connection for closure
 	buf := make([]byte, 1)
 	for {
-		rv.Conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		//rv.Conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 		_, err := rv.Conn.Read(buf)
 		if err != nil {
 			if err != io.EOF {
@@ -638,9 +638,25 @@ func handleUDPStartConnMap(rv *clientrequest.Request, localIP net.IP) error {
 // This is called from main.go when UDPEphemeralPort is disabled
 func HandleUDP(port uint16) error {
 	listenAddr := &net.UDPAddr{IP: net.IPv4zero, Port: int(port)}
-	udpConn, err := net.ListenUDP("udp", listenAddr)
-	if err != nil {
-		return fmt.Errorf("failed to listen on UDP port %d: %w", port, err)
+
+	// Retry for 10 seconds in case port is in TIME_WAIT state
+	retryDeadline := time.Now().Add(10 * time.Second)
+	var udpConn *net.UDPConn
+	var err error
+
+	for {
+		udpConn, err = net.ListenUDP("udp", listenAddr)
+		if err == nil {
+			break
+		}
+
+		// Check if we've exceeded the retry deadline
+		if time.Now().After(retryDeadline) {
+			return fmt.Errorf("failed to listen on UDP port %d after 10 seconds: %w", port, err)
+		}
+
+		// Wait before retrying
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	log.Printf("UDP listener started on port %d (ConnMap mode)", port)

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -44,7 +45,7 @@ func SetSocketOptions(fd uintptr) error {
 	if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_KEEPALIVE, 1); err != nil {
 		return err
 	}
-	log.Println("Socket options set successfully")
+	//log.Println("Socket options set successfully")
 
 	return nil
 }
@@ -54,17 +55,30 @@ func StartTcpServer(port uint16) {
 	if err != nil {
 		log.Fatalf("Failed to start listener: %v", err)
 	}
-	defer listener.Close()
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			log.Printf("Accept error on port %d: %v", port, err)
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-			log.Fatalf("FATAL: Accept failed on port %d, : %v", port, err)
+
+			// For permanent errors, try to recreate the listener
+			log.Printf("Permanent error on port %d, attempting to recreate listener", port)
+			listener.Close()
+
+			newListener, newErr := createListener(port)
+			if newErr != nil {
+				log.Fatalf("Failed to recreate listener on port %d: %v", port, newErr)
+			}
+
+			listener = newListener
+			log.Printf("Listener recreated successfully on port %d", port)
+			continue
 		}
+
 		if userdb.CpuOverThreshold || userdb.FdThreshold {
 			log.Printf("CPU or FD over threshold, rejecting connection: CPU=%v, FD=%v", userdb.CpuOverThreshold, userdb.FdThreshold)
 			conn.Close()
@@ -86,12 +100,24 @@ func createListener(port uint16) (net.Listener, error) {
 		return err
 	}
 
-	listener, err := lc.Listen(context.Background(), "tcp", ":"+strconv.Itoa(int(port)))
-	if err != nil {
-		return nil, err
-	}
+	// Retry for 10 seconds in case port is in TIME_WAIT state
+	retryDeadline := time.Now().Add(10 * time.Second)
+	var listener net.Listener
+	var err error
+	for {
+		listener, err = lc.Listen(context.Background(), "tcp", ":"+strconv.Itoa(int(port)))
+		if err == nil {
+			return listener, nil
+		}
 
-	return listener, nil
+		// Check if we've exceeded the retry deadline
+		if time.Now().After(retryDeadline) {
+			return nil, fmt.Errorf("failed to bind to port %d after 10 seconds: %v", port, err)
+		}
+
+		// Wait before retrying
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func handleConnection(c net.Conn) {
@@ -115,6 +141,12 @@ func handleConnection(c net.Conn) {
 	}
 
 	rv := clientrequest.NewRequest(c, "http")
+
+	// Check if SOCKS5 is disabled before handling
+	if isSocks5Request(buf) && config.Cfg.General.Socks5Disabled {
+		log.Printf("SOCKS5 request received but SOCKS5 is disabled, closing connection from %s", c.RemoteAddr().String())
+		return
+	}
 
 	if isSocks5Request(buf) {
 		rv, err = socks5.HandleSOCKS5Connection(reader, c, dataStore)

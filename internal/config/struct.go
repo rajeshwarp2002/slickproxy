@@ -131,6 +131,8 @@ type Config struct {
 		UDPEphemeralPort     bool   `json:"udp_ephemeral_port"`   // Use ephemeral ports for UDP relay (default: false, use ConnMap)
 		UDPTimeout           int    `json:"udp_timeout"`          // UDP connection keepalive timeout in seconds (default: 60)
 		UDPConnectionReuse   bool   `json:"udp_connection_reuse"` // Reuse/cache UDP connections for multiple packets (default: true), set false for request-response model
+		NoAuthError          bool   `json:"no_auth_error"`        // Suppress auth error responses (407) unless debug flag enabled (default: false)
+		Socks5Disabled       bool   `json:"socks5_disabled"`      // Disable SOCKS5 protocol support (default: false, SOCKS5 enabled)
 	} `json:"general"`
 	DB struct {
 		Connection  string `json:"connection"`
@@ -154,21 +156,4 @@ type Config struct {
 	Users   []ConfigUser       `json:"users"`
 
 	ProxyTable []ProxyConfigEntry
-}
-
-// GetUDPConnectionReuse returns whether UDP connection reuse is enabled
-// Defaults to true for backward compatibility if not explicitly set
-func (c *Config) GetUDPConnectionReuse() bool {
-	// In JSON config, if field is not present, it defaults to false
-	// But we want the default behavior to be true (connection reuse enabled)
-	// So we check: if it's explicitly false in config, honor that, otherwise default to true
-	// This is a bit tricky - we use the fact that if not set in JSON, we treat as true
-	// The only way to get false is if explicitly set to false in JSON
-	// For now, we implement: default true, but can be overridden to false
-	
-	// Since bool defaults to false, we need a different approach
-	// Best practice: provide explicit JSON default or handle in code
-	// For backward compatibility: treat unset (false) as true UNLESS we have a way to distinguish
-	// For this release: just return true as default, can be overridden to false in config
-	return true
 }

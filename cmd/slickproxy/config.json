@@ -8,7 +8,9 @@
     "proxy_files_regex": "^ZBYT",
     "refresh_users_interval": 5,
     "trackusage": true,
-    "dns_server": "4.2.2.2:53"
+    "dns_server": "4.2.2.2:53",
+    "no_auth_error": false,
+    "socks5_disabled": false
 },
 "ip_blocking": {
 	"enabled": true,

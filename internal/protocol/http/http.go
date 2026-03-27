@@ -83,7 +83,10 @@ func readProxyAuthHeader(requestObj *clientrequest.Request, parsedRequest *http.
 			}
 		}
 
-		requestObj.Conn.Write(proxyAuthenticationRequiredResponse)
+		// Only send error response if NoAuthError is false (default behavior)
+		if !config.Cfg.General.NoAuthError {
+			requestObj.Conn.Write(proxyAuthenticationRequiredResponse)
+		}
 		fmt.Println("AUTH: no auth header and no whitelist IP match for", clientIP, requestObj.Host, requestObj.Conn.RemoteAddr().String())
 		return "", fmt.Errorf("no auth header and no whitelist IP match for %s", clientIP)
 	}
@@ -167,7 +170,9 @@ func PerformProxyAuthenticationValidation(requestObj *clientrequest.Request, dec
 	credentialsKey := fmt.Sprintf("%s:%s", requestObj.Credentials.User, requestObj.Credentials.Password)
 	userRecord, authErr := userdb.UserExists(credentialsKey, dataStore.Users)
 	if authErr != nil {
-		requestObj.Conn.Write(proxyAuthenticationRequiredResponse)
+		if requestObj.Credentials.Debug || !config.Cfg.General.NoAuthError {
+			requestObj.Conn.Write(proxyAuthenticationRequiredResponse)
+		}
 		fmt.Println("AUTH: invalid user", credentialsKey, requestObj.Host, requestObj.Conn.RemoteAddr().String())
 		// Track authentication failure for IP blocking
 		if userdb.IPBlocker != nil {
@@ -192,14 +197,18 @@ func PerformProxyAuthenticationValidation(requestObj *clientrequest.Request, dec
 			(userRecord.ProxyPortRange[0] != 0 && userRecord.ProxyPortRange[0] > requestObj.Port) || (userRecord.ProxyPortRange[0] != 0 && userRecord.ProxyPortRange[1] < requestObj.Port) ||
 			!isIPWhitelisted || !isUserIPPortAuthorized(userRecord, requestObj.LocalIP, requestObj.Port) {
 			fmt.Println("AUTH: not authrorized port or ip", userRecord.ProxyIP, requestObj.LocalIP.String(), requestObj.Port, userRecord.ProxyPort, userRecord.ProxyPortRange, isIPWhitelisted, credentialsKey, requestObj.Host, requestObj.Conn.RemoteAddr().String())
-			requestObj.Conn.Write(proxyAuthenticationRequiredResponse)
+			if requestObj.Credentials.Debug || !config.Cfg.General.NoAuthError {
+				requestObj.Conn.Write(proxyAuthenticationRequiredResponse)
+			}
 			return fmt.Errorf("rate limit reached %v %v", !isIPWhitelisted, (int64(userRecord.ActiveConnections) != 0 && activeConnections+1 > int64(userRecord.ActiveConnections)))
 		}
 	}
 
 	if config.Cfg.General.TrackUsage && ((int64(userRecord.ActiveConnections) != 0 && activeConnections+1 > int64(userRecord.ActiveConnections)) ||
 		userRecord.TimeQuota != 0 && userRecord.TimeQuota < config.Ct.CurrentTime().Unix()) {
-		requestObj.Conn.Write(proxyAuthenticationRequiredResponse)
+		if requestObj.Credentials.Debug || !config.Cfg.General.NoAuthError {
+			requestObj.Conn.Write(proxyAuthenticationRequiredResponse)
+		}
 		fmt.Println("AUTH: active connection or time quota exceeded for user", credentialsKey, requestObj.Host, requestObj.Conn.RemoteAddr().String())
 		return fmt.Errorf("not authrorized port %v %v", !isIPWhitelisted, (int64(userRecord.ActiveConnections) != 0 && activeConnections+1 > int64(userRecord.ActiveConnections)))
 	}

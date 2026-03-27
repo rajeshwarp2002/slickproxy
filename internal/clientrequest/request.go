@@ -58,6 +58,7 @@ type AuthenticationCredentials struct {
 	UserDetail      *userdb.User
 	Code            string
 	OriginalSession string
+	Debug           bool
 }
 
 func NewRequest(conn net.Conn, connType string) Request {
@@ -143,6 +144,10 @@ func (auth *AuthenticationCredentials) ParseAuthentication(decodedAuthString str
 			auth.City = fieldValue
 		case "state":
 			auth.State = fieldValue
+		case "debug":
+			if strings.ToLower(fieldValue) == "true" || fieldValue == "1" {
+				auth.Debug = true
+			}
 		case "ttl":
 			if parsedTTL, err := strconv.Atoi(fieldValue); err == nil {
 				auth.Time = parsedTTL
