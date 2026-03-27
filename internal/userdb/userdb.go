@@ -2,11 +2,13 @@ package userdb
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"regexp"
 	"slickproxy/internal/config"
 	"slickproxy/internal/ipblocker"
@@ -175,6 +177,20 @@ func FetchAndUpdateUsers(start bool) error {
 		}
 
 		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Create file_regexes table if it doesn't exist (on startup)
+	if start {
+		createTableSQL := `
+		CREATE TABLE IF NOT EXISTS file_regexes (
+			id INT AUTO_INCREMENT PRIMARY KEY,
+			pattern VARCHAR(255) NOT NULL UNIQUE
+		)`
+		if _, err := db.Exec(createTableSQL); err != nil {
+			log.Printf("Warning: Could not create file_regexes table: %v", err)
+		} else {
+			log.Println("Ensured file_regexes table exists")
+		}
 	}
 
 	portRows, err := db.Query("SELECT port FROM listenports")
@@ -831,13 +847,35 @@ func ParseProxyFilesDirectory() ([]ProxyFileUser, error) {
 		return nil, fmt.Errorf("error reading directory %s: %v", path, err)
 	}
 
-	// Compile regex filter if configured
-	var fileRegex *regexp.Regexp
+	// Fetch regex patterns from database, union with config if table exists
+	var fileRegexes []*regexp.Regexp
+	dsn := "root:your_password@tcp(" + config.Cfg.DB.Connection + ")/slickproxy"
+	db, err := sql.Open("mysql", dsn)
+	if err == nil {
+		defer db.Close()
+
+		rows, err := db.Query("SELECT pattern FROM file_regexes ORDER BY id")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var pattern string
+				if err := rows.Scan(&pattern); err == nil {
+					if fileRegex, regexErr := regexp.Compile(pattern); regexErr == nil {
+						fileRegexes = append(fileRegexes, fileRegex)
+					} else {
+						log.Printf("Warning: Invalid file regex pattern from database: %v", regexErr)
+					}
+				}
+			}
+		}
+	}
+
+	// Append config regex (only used if no database regexes found, or unioned with them if table exists)
 	if config.Cfg.General.ProxyFilesRegex != "" {
-		var regexErr error
-		fileRegex, regexErr = regexp.Compile(config.Cfg.General.ProxyFilesRegex)
-		if regexErr != nil {
-			log.Printf("Warning: Invalid proxy files regex pattern: %v", regexErr)
+		if fileRegex, regexErr := regexp.Compile(config.Cfg.General.ProxyFilesRegex); regexErr == nil {
+			fileRegexes = append(fileRegexes, fileRegex)
+		} else {
+			log.Printf("Warning: Invalid proxy files regex from config: %v", regexErr)
 		}
 	}
 
@@ -847,10 +885,19 @@ func ParseProxyFilesDirectory() ([]ProxyFileUser, error) {
 			continue
 		}
 
-		// Apply regex filter if configured
-		if fileRegex != nil && !fileRegex.MatchString(entry.Name()) {
-			log.Printf("Skipping file %s (does not match regex)", entry.Name())
-			continue
+		// Apply regex filters if configured - file must match at least one regex
+		if len(fileRegexes) > 0 {
+			matched := false
+			for _, fileRegex := range fileRegexes {
+				if fileRegex.MatchString(entry.Name()) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				log.Printf("Skipping file %s (does not match any regex)", entry.Name())
+				continue
+			}
 		}
 
 		filePath := fmt.Sprintf("%s/%s", path, entry.Name())
@@ -982,4 +1029,146 @@ func StartProxyFileSync() {
 			}
 		}
 	}
+}
+
+// REST API handlers for file_regexes table
+func (d *DB) HandleFileRegexes(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		d.GetFileRegexes(w, r)
+	case "POST":
+		d.CreateFileRegex(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (d *DB) HandleFileRegex(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "DELETE":
+		d.DeleteFileRegex(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+type FileRegex struct {
+	ID      int    `json:"id"`
+	Pattern string `json:"pattern"`
+}
+
+func (d *DB) GetFileRegexes(w http.ResponseWriter, r *http.Request) {
+	dsn := "root:your_password@tcp(" + config.Cfg.DB.Connection + ")/slickproxy"
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Database connection error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+
+	rows, err := db.Query("SELECT id, pattern FROM file_regexes ORDER BY id")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Query error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var regexes []FileRegex
+	for rows.Next() {
+		var fr FileRegex
+		if err := rows.Scan(&fr.ID, &fr.Pattern); err != nil {
+			log.Printf("Error scanning regex: %v", err)
+			continue
+		}
+		regexes = append(regexes, fr)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(regexes)
+}
+
+func (d *DB) CreateFileRegex(w http.ResponseWriter, r *http.Request) {
+	var fr FileRegex
+	if err := json.NewDecoder(r.Body).Decode(&fr); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if fr.Pattern == "" {
+		http.Error(w, "Pattern cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	// Validate regex pattern
+	if _, err := regexp.Compile(fr.Pattern); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid regex pattern: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	dsn := "root:your_password@tcp(" + config.Cfg.DB.Connection + ")/slickproxy"
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Database connection error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+
+	result, err := db.Exec("INSERT INTO file_regexes (pattern) VALUES (?)", fr.Pattern)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Insert error: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error getting insert ID: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":      id,
+		"pattern": fr.Pattern,
+		"message": "Regex pattern created successfully",
+	})
+}
+
+func (d *DB) DeleteFileRegex(w http.ResponseWriter, r *http.Request) {
+	pattern := r.URL.Query().Get("pattern")
+	if pattern == "" {
+		http.Error(w, "Pattern parameter required", http.StatusBadRequest)
+		return
+	}
+
+	dsn := "root:your_password@tcp(" + config.Cfg.DB.Connection + ")/slickproxy"
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Database connection error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+
+	result, err := db.Exec("DELETE FROM file_regexes WHERE pattern = ?", pattern)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Delete error: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error getting affected rows: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if rowsAffected == 0 {
+		http.Error(w, "Pattern not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Regex pattern deleted successfully",
+		"pattern": pattern,
+	})
 }

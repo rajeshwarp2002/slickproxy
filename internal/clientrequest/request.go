@@ -33,6 +33,10 @@ type Request struct {
 	UpstreamProxy config.ProxyConfigEntry
 	Attempts      int
 	Error         string
+	Udp           bool
+	UdpClientIP   string // Client-declared IP from SOCKS5 ASSOCIATE (may be 0.0.0.0)
+	UdpClientPort int    // Client-declared port from SOCKS5 ASSOCIATE (may be 0)
+	ProxyIP       net.IP // Selected proxy IP for outbound connections
 }
 
 type ProxyConn struct {
@@ -54,6 +58,7 @@ type AuthenticationCredentials struct {
 	UserDetail      *userdb.User
 	Code            string
 	OriginalSession string
+	Debug           bool
 }
 
 func NewRequest(conn net.Conn, connType string) Request {
@@ -139,6 +144,10 @@ func (auth *AuthenticationCredentials) ParseAuthentication(decodedAuthString str
 			auth.City = fieldValue
 		case "state":
 			auth.State = fieldValue
+		case "debug":
+			if strings.ToLower(fieldValue) == "true" || fieldValue == "1" {
+				auth.Debug = true
+			}
 		case "ttl":
 			if parsedTTL, err := strconv.Atoi(fieldValue); err == nil {
 				auth.Time = parsedTTL

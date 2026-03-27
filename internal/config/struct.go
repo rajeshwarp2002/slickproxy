@@ -128,6 +128,11 @@ type Config struct {
 		ProxyFilesPath       string `json:"proxy_files_path"`
 		ProxyFilesRegex      string `json:"proxy_files_regex"`
 		RefreshUsersInterval int    `json:"refresh_users_interval"`
+		UDPEphemeralPort     bool   `json:"udp_ephemeral_port"`   // Use ephemeral ports for UDP relay (default: false, use ConnMap)
+		UDPTimeout           int    `json:"udp_timeout"`          // UDP connection keepalive timeout in seconds (default: 60)
+		UDPConnectionReuse   bool   `json:"udp_connection_reuse"` // Reuse/cache UDP connections for multiple packets (default: true), set false for request-response model
+		NoAuthError          bool   `json:"no_auth_error"`        // Suppress auth error responses (407) unless debug flag enabled (default: false)
+		Socks5Disabled       bool   `json:"socks5_disabled"`      // Disable SOCKS5 protocol support (default: false, SOCKS5 enabled)
 	} `json:"general"`
 	DB struct {
 		Connection  string `json:"connection"`

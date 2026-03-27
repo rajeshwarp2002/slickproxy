@@ -93,16 +93,26 @@ func ExecuteCommand(subnet string) error {
 
 		cmd := exec.Command("ip", "route", "add", "to", "local", subnet, "dev", "lo")
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("error executing IPv4 command: %v", err)
+			// Ignore "File exists" error - route already added
+			if !strings.Contains(err.Error(), "exit status 2") {
+				return fmt.Errorf("error executing IPv4 command: %v", err)
+			}
+			log.Printf("IPv4 route already exists for %s (continuing)", subnet)
+		} else {
+			log.Printf("IPv4 route added successfully for %s", subnet)
 		}
-		fmt.Println("IPv4 route added successfully")
 	} else {
 
 		cmd := exec.Command("ip", "-6", "route", "add", "to", "local", subnet, "dev", "lo")
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("error executing IPv6 command: %v", err)
+			// Ignore "File exists" error - route already added
+			if !strings.Contains(err.Error(), "exit status 2") {
+				return fmt.Errorf("error executing IPv6 command: %v", err)
+			}
+			log.Printf("IPv6 route already exists for %s (continuing)", subnet)
+		} else {
+			log.Printf("IPv6 route added successfully for %s", subnet)
 		}
-		fmt.Println("IPv6 route added successfully")
 	}
 	return nil
 }

@@ -12,6 +12,7 @@ import (
 	"slickproxy/internal/metrics"
 	"slickproxy/internal/stats"
 	"slickproxy/internal/tcp"
+	"slickproxy/internal/udp"
 	userdb "slickproxy/internal/userdb"
 	"strconv"
 	"syscall"
@@ -118,6 +119,18 @@ func main() {
 	go userdb.WriteUsersToDB()
 	go userdb.MonitorCPUUsage()
 	go userdb.RefreshUsersData()
+
+	// Start UDP listeners if not in ephemeral port mode (ConnMap mode)
+	if !config.Cfg.General.UDPEphemeralPort {
+		for _, port := range config.Cfg.Ports {
+			port, _ := strconv.Atoi(port)
+			go func(p uint16) {
+				if err := udp.HandleUDP(p); err != nil {
+					log.Printf("Failed to start UDP listener on port %d: %v", p, err)
+				}
+			}(uint16(port))
+		}
+	}
 
 	// Initialize IP blocker (can be nil if disabled in config)
 	userdb.IPBlocker = ipblocker.NewIPBlocker()

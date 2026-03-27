@@ -799,20 +799,25 @@ func (db *DB) LoadAndProcessUsers() error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var username, proxyIPList, proxyIP string
+		var username string
+		var proxyIPList, proxyIP sql.NullString
 		if err := rows.Scan(&username, &proxyIPList, &proxyIP); err != nil {
 			log.Printf("Error scanning user %s: %v", username, err)
 			continue
 		}
 
+		// Convert NULL to empty string
+		proxyIPListStr := proxyIPList.String
+		proxyIPStr := proxyIP.String
+
 		// Skip if proxyIPList is empty
-		if proxyIPList == "" {
+		if proxyIPListStr == "" {
 			continue
 		}
 
 		// Case 1: proxyIP is blank - add IPs/subnets to interface
-		if proxyIP == "" {
-			if err := handleIPsWithoutProxyIP(proxyIPList); err != nil {
+		if proxyIPStr == "" {
+			if err := handleIPsWithoutProxyIP(proxyIPListStr); err != nil {
 				log.Printf("Failed to process IPs for user %s (proxyIP blank): %v", username, err)
 				continue
 			}
@@ -821,7 +826,7 @@ func (db *DB) LoadAndProcessUsers() error {
 		}
 
 		// Case 2: proxyIP is set - add subnets as routes
-		ips := strings.Split(proxyIPList, ",")
+		ips := strings.Split(proxyIPListStr, ",")
 		for _, ip := range ips {
 			ip = strings.TrimSpace(ip)
 			if strings.Contains(ip, "/") {
@@ -890,6 +895,8 @@ func StartServer() {
 	http.HandleFunc("/update", withAuth(db.UpdateUser))
 	http.HandleFunc("/delete", withAuth(db.DeleteUser))
 	http.HandleFunc("/metrics", withAuth(db.GetMetrics))
+	http.HandleFunc("/fileregex", withAuth(db.HandleFileRegex))
+	http.HandleFunc("/fileregexes", withAuth(db.HandleFileRegexes))
 
 	listener, err := createListener(8080)
 	if err != nil {
@@ -945,12 +952,24 @@ func createListener(port uint16) (net.Listener, error) {
 		return err
 	}
 
-	listener, err := lc.Listen(context.Background(), "tcp", ":"+strconv.Itoa(int(port)))
-	if err != nil {
-		return nil, err
-	}
+	// Retry for 10 seconds in case port is in TIME_WAIT state
+	retryDeadline := time.Now().Add(10 * time.Second)
+	var listener net.Listener
+	var err error
+	for {
+		listener, err = lc.Listen(context.Background(), "tcp", ":"+strconv.Itoa(int(port)))
+		if err == nil {
+			return listener, nil
+		}
 
-	return listener, nil
+		// Check if we've exceeded the retry deadline
+		if time.Now().After(retryDeadline) {
+			return nil, fmt.Errorf("failed to bind to port %d after 10 seconds: %v", port, err)
+		}
+
+		// Wait before retrying
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func loadConfig(allowedIPs *[]string) error {
